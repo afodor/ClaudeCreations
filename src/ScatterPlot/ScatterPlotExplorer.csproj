@@ -6,11 +6,16 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
+    <ApplicationIcon>app.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="ScottPlot.WPF" Version="5.1.57" />
   </ItemGroup>
 
-</Project>
+  <ItemGroup>
+    <None Include="app.ico" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 
+
+</Project>

@@ -140,6 +140,13 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        try
+        {
+            string icoPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "app.ico");
+            if (File.Exists(icoPath))
+                Icon = new System.Windows.Media.Imaging.BitmapImage(new Uri(icoPath));
+        }
+        catch { }
         PopulateStaticCombos();
         SetupSelectionInput();
         LoadRecentFiles();
