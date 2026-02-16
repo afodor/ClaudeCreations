@@ -3,6 +3,7 @@ using System.Data;
 using System.Globalization;
 using System.IO;
 using System.Text;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -93,6 +94,14 @@ public partial class MainWindow : Window
 
     // categorical colour overrides (category value → hex like "#FF7F0E")
     private Dictionary<string, string> _categoryColorOverrides = new();
+
+    // per-point colour overrides (row index → colour)
+    private Dictionary<int, ScottPlot.Color> _pointColorOverrides = new();
+    // saved preset index for restoring after "Colour selected" override
+    private int _savedPresetIndex = 0;
+
+    // journal
+    private string? _journalPath;
 
     // multi-window support
     private static readonly List<MainWindow> _allWindows = new();
@@ -212,6 +221,7 @@ public partial class MainWindow : Window
             _selectedRows.Clear();
             _gridHighlightedRows.Clear();
             _legendHighlightedRows.Clear();
+            _pointColorOverrides.Clear(); // row indices shift after delete
             _hoveredRow = -1;
             ClearRegressionModel();
             BuildFilterPanel();
@@ -289,11 +299,13 @@ public partial class MainWindow : Window
             btnClose.IsEnabled = true;
             menuClose.IsEnabled = true;
             menuCopyRCode.IsEnabled = true;
+            menuJournalPublish.IsEnabled = true;
             AddToRecentFiles(path);
             _selectedRows.Clear();
             _gridHighlightedRows.Clear();
             _legendHighlightedRows.Clear();
             _categoryColorOverrides.Clear();
+            _pointColorOverrides.Clear();
             statsPanel.Children.Clear();
             statsPanel.Children.Add(new TextBlock { Text = "(no model fitted)", FontSize = 11, Foreground = Brushes.Gray });
             AddIdentityLineControls();
@@ -330,6 +342,7 @@ public partial class MainWindow : Window
         _regressionResponse = null;
         _showIdentityLine = false;
         _categoryColorOverrides.Clear();
+        _pointColorOverrides.Clear();
         statsPanel.Children.Clear();
         statsPanel.Children.Add(new TextBlock { Text = "(no model fitted)", FontSize = 11, Foreground = Brushes.Gray });
         AddIdentityLineControls();
@@ -348,6 +361,7 @@ public partial class MainWindow : Window
         btnClose.IsEnabled = false;
         menuClose.IsEnabled = false;
         menuCopyRCode.IsEnabled = false;
+        menuJournalPublish.IsEnabled = false;
         txtFileName.Text = "Drag & drop a delimited text file, or click Open";
         legendPanel.Children.Clear();
         dgSelected.ItemsSource = null;
@@ -736,6 +750,13 @@ public partial class MainWindow : Window
             for (int i = 0; i < n; i++) pointColors[i] = baseColor;
         }
 
+        // Apply per-point colour overrides (from "Colour selected")
+        if (_pointColorOverrides.Count > 0)
+        {
+            foreach (var (i, c) in _pointColorOverrides)
+                if (i >= 0 && i < n) pointColors[i] = c;
+        }
+
         // Build per-point shape + category row maps
         string[] shapeCategories = [];
         MarkerShape[] pointShapes = new MarkerShape[n];
@@ -806,7 +827,7 @@ public partial class MainWindow : Window
         }
 
         // --- Render points grouped by (color, shape, size) or individually ---
-        bool needsPerPoint = useSizeCol || (useColorCol && IsNumericColumn(colorCol!)); // per-point when size or numeric colour varies
+        bool needsPerPoint = useSizeCol || (useColorCol && IsNumericColumn(colorCol!)) || _pointColorOverrides.Count > 0; // per-point when size, numeric colour, or point overrides vary
         if (needsPerPoint)
         {
             for (int i = 0; i < n; i++)
@@ -971,7 +992,22 @@ public partial class MainWindow : Window
         DrawHighlightRings(_selectedRows, ScottPlot.Colors.Red, baseSize + 6);
 
         // --- Highlight DataGrid-clicked points ---
-        DrawHighlightRings(_gridHighlightedRows, ScottPlot.Colors.Orange, baseSize + 8);
+        // Points that are both selected AND highlighted from the DataGrid get a bright extra ring
+        if (_gridHighlightedRows.Count > 0 && _selectedRows.Count > 0)
+        {
+            var both = new HashSet<int>(_gridHighlightedRows);
+            both.IntersectWith(_selectedRows);
+            if (both.Count > 0)
+            {
+                DrawHighlightRings(both, ScottPlot.Colors.Orange, baseSize + 12);
+                DrawHighlightRings(both, ScottPlot.Colors.Yellow, baseSize + 8);
+            }
+            var gridOnly = new HashSet<int>(_gridHighlightedRows);
+            gridOnly.ExceptWith(_selectedRows);
+            DrawHighlightRings(gridOnly, ScottPlot.Colors.Orange, baseSize + 8);
+        }
+        else
+            DrawHighlightRings(_gridHighlightedRows, ScottPlot.Colors.Orange, baseSize + 8);
 
         // --- Highlight legend-hovered points ---
         DrawHighlightRings(_legendHighlightedRows, ScottPlot.Colors.Cyan, baseSize + 8);
@@ -2974,7 +3010,28 @@ public partial class MainWindow : Window
     private void PresetColor_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (_updating || cboPresetColor.SelectedIndex < 0) return;
-        string hex = PresetColors[cboPresetColor.SelectedIndex].Hex;
+        int newIdx = cboPresetColor.SelectedIndex;
+        string hex = PresetColors[newIdx].Hex;
+
+        // Apply colour to selected points if "Colour selected" is checked
+        if (chkColorSelected.IsChecked == true && _selectedRows.Count > 0)
+        {
+            var color = ParseHexColor(hex);
+            foreach (int i in _selectedRows)
+                _pointColorOverrides[i] = color;
+            // Restore the preset to what it was so the base colour doesn't change
+            _updating = true;
+            cboPresetColor.SelectedIndex = _savedPresetIndex;
+            string savedHex = PresetColors[_savedPresetIndex].Hex;
+            rectColor.Fill = new SolidColorBrush(
+                (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(savedHex));
+            _updating = false;
+            UpdatePlot(true);
+            return;
+        }
+
+        // Normal path: update swatch and remember this as the base
+        _savedPresetIndex = newIdx;
         rectColor.Fill = new SolidColorBrush(
             (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(hex));
         // Reset "Colour by column" so single colour takes effect
@@ -3884,6 +3941,950 @@ public partial class MainWindow : Window
         byte g = byte.Parse(hex.Substring(2, 2), NumberStyles.HexNumber);
         byte b = byte.Parse(hex.Substring(4, 2), NumberStyles.HexNumber);
         return new ScottPlot.Color(r, g, b);
+    }
+
+    // ====================================================================
+    //  Session Journal
+    // ====================================================================
+
+    private void MenuJournalPublish_Click(object sender, RoutedEventArgs e)
+    {
+        if (_data == null || _columns == null) return;
+
+        // If no journal path yet, prompt user
+        if (_journalPath == null)
+        {
+            var dlg = new SaveFileDialog
+            {
+                Title = "Create new or select existing journal to append",
+                Filter = "HTML files|*.html",
+                FileName = $"journal_{DateTime.Now:yyyyMMdd}.html",
+                InitialDirectory = _filePath != null ? System.IO.Path.GetDirectoryName(_filePath) : "",
+                OverwritePrompt = false  // we append to existing files, not overwrite
+            };
+            if (dlg.ShowDialog() != true) return;
+            _journalPath = dlg.FileName;
+        }
+
+        // Show annotation dialog
+        var dialog = new Window
+        {
+            Title = "Publish View to Journal",
+            Width = 420, Height = 260,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Owner = this,
+            ResizeMode = ResizeMode.NoResize
+        };
+        var stack = new StackPanel { Margin = new Thickness(15) };
+        stack.Children.Add(new TextBlock { Text = "Add notes about this view:", FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 6) });
+        var txtAnnotation = new TextBox
+        {
+            AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
+            Height = 120, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            FontSize = 12
+        };
+        stack.Children.Add(txtAnnotation);
+        var btnPanel = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal, HorizontalAlignment = System.Windows.HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0) };
+        var btnOk = new Button { Content = "Publish", Padding = new Thickness(16, 4, 16, 4), IsDefault = true };
+        var btnCancel = new Button { Content = "Cancel", Padding = new Thickness(16, 4, 16, 4), Margin = new Thickness(8, 0, 0, 0), IsCancel = true };
+        btnOk.Click += (s, ev) => dialog.DialogResult = true;
+        btnPanel.Children.Add(btnOk);
+        btnPanel.Children.Add(btnCancel);
+        stack.Children.Add(btnPanel);
+        dialog.Content = stack;
+
+        if (dialog.ShowDialog() != true) return;
+
+        string annotation = txtAnnotation.Text.Trim();
+
+        try
+        {
+            // Render plot to base64 PNG
+            string tempPng = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"spe_journal_{Guid.NewGuid():N}.png");
+            wpfPlot.Plot.SavePng(tempPng, 1000, 700);
+            byte[] pngBytes = File.ReadAllBytes(tempPng);
+            string base64Img = Convert.ToBase64String(pngBytes);
+            try { File.Delete(tempPng); } catch { }
+
+            // Build view state JSON
+            string stateJson = BuildViewStateJson();
+
+            // Build summary line
+            string summary = BuildEntrySummary();
+
+            // Build the HTML entry
+            string timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+            string entryId = $"entry-{DateTime.Now:yyyyMMddHHmmss}";
+            var entrySb = new StringBuilder();
+            entrySb.AppendLine($"<div class=\"entry\" id=\"{entryId}\">");
+            entrySb.AppendLine($"  <h2>{System.Net.WebUtility.HtmlEncode(timestamp)}</h2>");
+            entrySb.AppendLine($"  <p class=\"summary\">{System.Net.WebUtility.HtmlEncode(summary)}</p>");
+            entrySb.AppendLine($"  <img src=\"data:image/png;base64,{base64Img}\" alt=\"Plot snapshot\"/>");
+            if (!string.IsNullOrEmpty(annotation))
+            {
+                entrySb.AppendLine($"  <div class=\"annotation\">");
+                foreach (var line in annotation.Split('\n'))
+                    entrySb.AppendLine($"    <p>{System.Net.WebUtility.HtmlEncode(line.TrimEnd('\r'))}</p>");
+                entrySb.AppendLine($"  </div>");
+            }
+            entrySb.AppendLine($"  <details><summary>View state (JSON)</summary>");
+            entrySb.AppendLine($"  <script class=\"view-state\" type=\"application/json\">");
+            entrySb.AppendLine(stateJson);
+            entrySb.AppendLine($"  </script>");
+            entrySb.AppendLine($"  <pre class=\"json-display\">{System.Net.WebUtility.HtmlEncode(stateJson)}</pre>");
+            entrySb.AppendLine($"  </details>");
+            entrySb.AppendLine($"</div>");
+
+            // Write or append to journal file
+            if (!File.Exists(_journalPath))
+            {
+                // Create new journal with HTML header
+                var fileSb = new StringBuilder();
+                fileSb.AppendLine("<!DOCTYPE html>");
+                fileSb.AppendLine("<html lang=\"en\">");
+                fileSb.AppendLine("<head>");
+                fileSb.AppendLine("<meta charset=\"UTF-8\">");
+                fileSb.AppendLine("<title>Scatter Plot Explorer — Session Journal</title>");
+                fileSb.AppendLine("<style>");
+                fileSb.AppendLine("body { font-family: 'Segoe UI', Calibri, Arial, sans-serif; max-width: 1100px; margin: 0 auto; padding: 20px; background: #fafafa; color: #333; }");
+                fileSb.AppendLine("h1 { border-bottom: 2px solid #1F77B4; padding-bottom: 8px; color: #1F77B4; }");
+                fileSb.AppendLine(".entry { background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 20px; margin-bottom: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }");
+                fileSb.AppendLine(".entry h2 { margin-top: 0; font-size: 1.1em; color: #555; }");
+                fileSb.AppendLine(".entry img { max-width: 100%; border: 1px solid #eee; border-radius: 4px; margin: 10px 0; }");
+                fileSb.AppendLine(".annotation { background: #fffde7; border-left: 3px solid #f9a825; padding: 10px 14px; margin: 10px 0; border-radius: 0 4px 4px 0; }");
+                fileSb.AppendLine(".annotation p { margin: 4px 0; }");
+                fileSb.AppendLine(".summary { font-size: 0.9em; color: #777; margin: 2px 0 10px 0; }");
+                fileSb.AppendLine("details { margin-top: 10px; }");
+                fileSb.AppendLine("details summary { cursor: pointer; color: #1F77B4; font-size: 0.9em; }");
+                fileSb.AppendLine(".json-display { background: #f5f5f5; padding: 10px; border-radius: 4px; font-size: 0.8em; overflow-x: auto; max-height: 300px; overflow-y: auto; }");
+                fileSb.AppendLine("@media print { .entry { break-inside: avoid; } details { display: none; } }");
+                fileSb.AppendLine("</style>");
+                fileSb.AppendLine("</head>");
+                fileSb.AppendLine("<body>");
+                fileSb.AppendLine("<h1>Scatter Plot Explorer — Session Journal</h1>");
+                fileSb.Append(entrySb);
+                fileSb.AppendLine("</body>");
+                fileSb.AppendLine("</html>");
+                File.WriteAllText(_journalPath, fileSb.ToString(), Encoding.UTF8);
+            }
+            else
+            {
+                // Append before closing </body></html>
+                string existing = File.ReadAllText(_journalPath, Encoding.UTF8);
+                int bodyClose = existing.LastIndexOf("</body>", StringComparison.OrdinalIgnoreCase);
+                if (bodyClose >= 0)
+                {
+                    string updated = existing.Substring(0, bodyClose) + entrySb.ToString() + existing.Substring(bodyClose);
+                    File.WriteAllText(_journalPath, updated, Encoding.UTF8);
+                }
+                else
+                {
+                    // Fallback: just append
+                    File.AppendAllText(_journalPath, entrySb.ToString(), Encoding.UTF8);
+                }
+            }
+
+            MessageBox.Show($"View published to journal.\n{_journalPath}", "Journal", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Error publishing to journal:\n{ex.Message}", "Journal Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private string BuildViewStateJson()
+    {
+        var state = new Dictionary<string, object?>();
+        state["timestamp"] = DateTime.Now.ToString("o");
+        state["filePath"] = _filePath;
+        state["delimiter"] = _fileDelimiter.ToString();
+        state["xColumn"] = cboX.SelectedItem?.ToString();
+        state["yColumn"] = cboY.SelectedItem?.ToString();
+
+        string? colorCol = cboColor.SelectedItem?.ToString();
+        state["colorColumn"] = colorCol == "(none)" ? null : colorCol;
+        string? shapeCol = cboShapeCol.SelectedItem?.ToString();
+        state["shapeColumn"] = shapeCol == "(none)" ? null : shapeCol;
+        string? sizeCol = cboSizeCol.SelectedItem?.ToString();
+        state["sizeColumn"] = sizeCol == "(none)" ? null : sizeCol;
+        string? labelCol = cboLabelCol.SelectedItem?.ToString();
+        state["labelColumn"] = labelCol == "(none)" ? null : labelCol;
+
+        state["logX"] = chkLogX.IsChecked == true;
+        state["logY"] = chkLogY.IsChecked == true;
+        state["invertX"] = chkInvertX.IsChecked == true;
+        state["invertY"] = chkInvertY.IsChecked == true;
+        state["logColor"] = chkLogColor.IsChecked == true;
+        state["reverseColor"] = chkReverseColor.IsChecked == true;
+        state["logSize"] = chkLogSize.IsChecked == true;
+        state["reverseSize"] = chkReverseSize.IsChecked == true;
+
+        state["presetColorIndex"] = cboPresetColor.SelectedIndex;
+        state["shapeIndex"] = cboShape.SelectedIndex;
+        state["sliderSize"] = sliderSize.Value;
+
+        state["xMin"] = txtXMin.Text;
+        state["xMax"] = txtXMax.Text;
+        state["yMin"] = txtYMin.Text;
+        state["yMax"] = txtYMax.Text;
+
+        // Numeric filters — only those narrower than defaults
+        var numFilters = new Dictionary<string, object>();
+        foreach (var (col, (fmin, fmax)) in _numericFilters)
+            numFilters[col] = new { min = fmin, max = fmax };
+        state["numericFilters"] = numFilters;
+
+        // Categorical filters
+        var catFilters = new Dictionary<string, object>();
+        foreach (var (col, allowed) in _categoricalFilters)
+            catFilters[col] = allowed.ToList();
+        state["categoricalFilters"] = catFilters;
+
+        // Selected rows
+        state["selectedRows"] = _selectedRows.OrderBy(i => i).ToList();
+
+        // Identity line
+        state["showIdentityLine"] = _showIdentityLine;
+        state["identityLineColor"] = $"#{_identityLineColor.Red:X2}{_identityLineColor.Green:X2}{_identityLineColor.Blue:X2}";
+        state["identityLineWidth"] = _identityLineWidth;
+        state["identityLineDashed"] = _identityLineDashed;
+
+        // Cartesian axes
+        state["showCartesianAxes"] = _showCartesianAxes;
+
+        // Regression
+        if (_regressionCoeffs != null)
+        {
+            state["regressionCoeffs"] = _regressionCoeffs.ToList();
+            state["regressionPredictors"] = _regressionPredictors?.ToList();
+            state["regressionResponse"] = _regressionResponse;
+            state["regressionOrder"] = _regressionOrder;
+            state["regressionLogResponse"] = _regressionLogResponse;
+            state["regressionLogPredictors"] = _regressionLogPredictors;
+            state["regLineColor"] = $"#{_regLineColor.Red:X2}{_regLineColor.Green:X2}{_regLineColor.Blue:X2}";
+            state["regLineWidth"] = _regLineWidth;
+            state["regLineDashed"] = _regLineDashed;
+        }
+
+        // Category colour overrides
+        if (_categoryColorOverrides.Count > 0)
+            state["categoryColorOverrides"] = new Dictionary<string, string>(_categoryColorOverrides);
+
+        // Label font
+        state["labelFontFamily"] = _labelFontFamily;
+        state["labelFontSize"] = _labelFontSize;
+        state["labelFontColor"] = $"#{_labelFontColor.Red:X2}{_labelFontColor.Green:X2}{_labelFontColor.Blue:X2}";
+
+        var options = new JsonSerializerOptions { WriteIndented = true };
+        return JsonSerializer.Serialize(state, options);
+    }
+
+    private string BuildEntrySummary()
+    {
+        var parts = new List<string>();
+        string? x = cboX.SelectedItem?.ToString();
+        string? y = cboY.SelectedItem?.ToString();
+        if (x != null && y != null) parts.Add($"X={x}, Y={y}");
+
+        string? colourCol = cboColor.SelectedItem?.ToString();
+        if (colourCol != null && colourCol != "(none)") parts.Add($"Colour={colourCol}");
+
+        int nVisible = 0;
+        if (_plotX != null)
+            for (int i = 0; i < _plotX.Length; i++)
+                if (IsRowVisible(i) && !double.IsNaN(_plotX[i]) && !double.IsNaN(_plotY![i]))
+                    nVisible++;
+        parts.Add($"N={nVisible}");
+
+        if (_selectedRows.Count > 0) parts.Add($"{_selectedRows.Count} selected");
+        if (_regressionCoeffs != null) parts.Add($"Regression (order {_regressionOrder})");
+        if (chkLogX.IsChecked == true) parts.Add("log₁₀ X");
+        if (chkLogY.IsChecked == true) parts.Add("log₁₀ Y");
+
+        return string.Join(" · ", parts);
+    }
+
+    private void MenuJournalOpen_Click(object sender, RoutedEventArgs e)
+    {
+        string? pathToOpen = _journalPath;
+
+        if (pathToOpen == null || !File.Exists(pathToOpen))
+        {
+            var dlg = new OpenFileDialog
+            {
+                Title = "Open journal file",
+                Filter = "HTML files|*.html|All files|*.*",
+                InitialDirectory = _filePath != null ? System.IO.Path.GetDirectoryName(_filePath) : ""
+            };
+            if (dlg.ShowDialog() != true) return;
+            pathToOpen = dlg.FileName;
+            _journalPath = pathToOpen;
+        }
+
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo(pathToOpen) { UseShellExecute = true };
+            System.Diagnostics.Process.Start(psi);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Could not open journal:\n{ex.Message}");
+        }
+    }
+
+    private void MenuJournalLoad_Click(object sender, RoutedEventArgs e)
+    {
+        // Pick a journal file if none set
+        string? journalFile = _journalPath;
+        if (journalFile == null || !File.Exists(journalFile))
+        {
+            var dlg = new OpenFileDialog
+            {
+                Title = "Open journal file",
+                Filter = "HTML files|*.html|All files|*.*",
+                InitialDirectory = _filePath != null ? System.IO.Path.GetDirectoryName(_filePath) : ""
+            };
+            if (dlg.ShowDialog() != true) return;
+            journalFile = dlg.FileName;
+            _journalPath = journalFile;
+        }
+
+        // Parse entries from journal HTML
+        string html = File.ReadAllText(journalFile, Encoding.UTF8);
+        var entries = ParseJournalEntries(html);
+        if (entries.Count == 0)
+        {
+            MessageBox.Show("No entries found in journal file.", "Load View", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        // Show picker dialog
+        var dialog = new Window
+        {
+            Title = "Load View from Journal",
+            Width = 500, Height = 400,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Owner = this,
+            ResizeMode = ResizeMode.CanResize
+        };
+        var stack = new StackPanel { Margin = new Thickness(15) };
+        stack.Children.Add(new TextBlock { Text = "Select an entry to restore:", FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 8) });
+        var lb = new ListBox { Height = 260 };
+        foreach (var (timestamp, preview, json) in entries)
+        {
+            string display = $"{timestamp}";
+            if (!string.IsNullOrEmpty(preview)) display += $"  —  {preview}";
+            lb.Items.Add(new ListBoxItem { Content = display, Tag = json });
+        }
+        lb.SelectedIndex = entries.Count - 1; // default to most recent
+        stack.Children.Add(lb);
+        var btnPanel = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal, HorizontalAlignment = System.Windows.HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0) };
+        var btnOk = new Button { Content = "Load", Padding = new Thickness(16, 4, 16, 4), IsDefault = true };
+        var btnCancel = new Button { Content = "Cancel", Padding = new Thickness(16, 4, 16, 4), Margin = new Thickness(8, 0, 0, 0), IsCancel = true };
+        btnOk.Click += (s, ev) => { if (lb.SelectedItem != null) dialog.DialogResult = true; };
+        lb.MouseDoubleClick += (s, ev) => { if (lb.SelectedItem != null) dialog.DialogResult = true; };
+        btnPanel.Children.Add(btnOk);
+        btnPanel.Children.Add(btnCancel);
+        stack.Children.Add(btnPanel);
+        dialog.Content = stack;
+
+        if (dialog.ShowDialog() != true) return;
+
+        string selectedJson = ((ListBoxItem)lb.SelectedItem!).Tag?.ToString() ?? "";
+        if (string.IsNullOrEmpty(selectedJson))
+        {
+            MessageBox.Show("No view state found for this entry.");
+            return;
+        }
+
+        try
+        {
+            ApplyViewState(selectedJson);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Error loading view state:\n{ex.Message}", "Load Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private class JournalEntry
+    {
+        public string Timestamp { get; set; } = "";
+        public string Summary { get; set; } = "";
+        public string Annotation { get; set; } = "";
+        public string Base64Image { get; set; } = "";  // without data:image/png;base64, prefix
+        public string Json { get; set; } = "";
+        public bool Deleted { get; set; }
+    }
+
+    private List<JournalEntry> ParseJournalEntriesFull(string html)
+    {
+        var entries = new List<JournalEntry>();
+        string scriptOpen = "<script class=\"view-state\" type=\"application/json\">";
+        string scriptClose = "</script>";
+
+        int pos = 0;
+        while (true)
+        {
+            int entryStart = html.IndexOf("<div class=\"entry\"", pos, StringComparison.OrdinalIgnoreCase);
+            if (entryStart < 0) break;
+
+            int nextEntry = html.IndexOf("<div class=\"entry\"", entryStart + 10, StringComparison.OrdinalIgnoreCase);
+            int entryEnd = nextEntry > 0 ? nextEntry : html.Length;
+            string entryHtml = html.Substring(entryStart, entryEnd - entryStart);
+
+            var entry = new JournalEntry();
+
+            // Timestamp from <h2>
+            int h2s = entryHtml.IndexOf("<h2>", StringComparison.OrdinalIgnoreCase);
+            int h2e = entryHtml.IndexOf("</h2>", h2s >= 0 ? h2s : 0, StringComparison.OrdinalIgnoreCase);
+            if (h2s >= 0 && h2e > h2s)
+                entry.Timestamp = System.Net.WebUtility.HtmlDecode(entryHtml.Substring(h2s + 4, h2e - h2s - 4)).Trim();
+
+            // Summary from <p class="summary">
+            int sumS = entryHtml.IndexOf("<p class=\"summary\">", StringComparison.OrdinalIgnoreCase);
+            if (sumS >= 0)
+            {
+                sumS += "<p class=\"summary\">".Length;
+                int sumE = entryHtml.IndexOf("</p>", sumS, StringComparison.OrdinalIgnoreCase);
+                if (sumE > sumS)
+                    entry.Summary = System.Net.WebUtility.HtmlDecode(entryHtml.Substring(sumS, sumE - sumS)).Trim();
+            }
+
+            // Base64 image from <img src="data:image/png;base64,...">
+            int imgS = entryHtml.IndexOf("data:image/png;base64,", StringComparison.OrdinalIgnoreCase);
+            if (imgS >= 0)
+            {
+                imgS += "data:image/png;base64,".Length;
+                int imgE = entryHtml.IndexOf("\"", imgS, StringComparison.Ordinal);
+                if (imgE > imgS)
+                    entry.Base64Image = entryHtml.Substring(imgS, imgE - imgS);
+            }
+
+            // Annotation from <div class="annotation"> — collect all <p> tags
+            int annS = entryHtml.IndexOf("<div class=\"annotation\">", StringComparison.OrdinalIgnoreCase);
+            if (annS >= 0)
+            {
+                int annE = entryHtml.IndexOf("</div>", annS, StringComparison.OrdinalIgnoreCase);
+                if (annE > annS)
+                {
+                    string annBlock = entryHtml.Substring(annS, annE - annS);
+                    var lines = new List<string>();
+                    int pPos = 0;
+                    while (true)
+                    {
+                        int pS = annBlock.IndexOf("<p>", pPos, StringComparison.OrdinalIgnoreCase);
+                        if (pS < 0) break;
+                        pS += 3;
+                        int pE = annBlock.IndexOf("</p>", pS, StringComparison.OrdinalIgnoreCase);
+                        if (pE < 0) break;
+                        lines.Add(System.Net.WebUtility.HtmlDecode(annBlock.Substring(pS, pE - pS)));
+                        pPos = pE + 4;
+                    }
+                    entry.Annotation = string.Join("\n", lines);
+                }
+            }
+
+            // JSON from <script class="view-state">
+            int scrS = entryHtml.IndexOf(scriptOpen, StringComparison.OrdinalIgnoreCase);
+            int scrE = entryHtml.IndexOf(scriptClose, scrS >= 0 ? scrS : 0, StringComparison.OrdinalIgnoreCase);
+            if (scrS >= 0 && scrE > scrS)
+                entry.Json = entryHtml.Substring(scrS + scriptOpen.Length, scrE - scrS - scriptOpen.Length).Trim();
+
+            entries.Add(entry);
+            pos = entryEnd;
+        }
+
+        return entries;
+    }
+
+    /// <summary>Backwards-compat wrapper used by Load view dialog.</summary>
+    private List<(string timestamp, string preview, string json)> ParseJournalEntries(string html)
+    {
+        var full = ParseJournalEntriesFull(html);
+        return full.Select(e =>
+        {
+            string preview = e.Annotation;
+            if (preview.Length > 80) preview = preview.Substring(0, 77) + "...";
+            if (preview.Contains('\n')) preview = preview.Substring(0, preview.IndexOf('\n'));
+            return (e.Timestamp, preview, e.Json);
+        }).Where(x => !string.IsNullOrEmpty(x.Json)).ToList();
+    }
+
+    private void ApplyViewState(string json)
+    {
+        var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        // Check if we need to load a file first
+        string? filePath = root.TryGetProperty("filePath", out var fp) ? fp.GetString() : null;
+        if (filePath != null && _filePath != filePath)
+        {
+            if (File.Exists(filePath))
+                LoadFile(filePath);
+            else
+            {
+                MessageBox.Show($"Data file not found:\n{filePath}\n\nOpen the file first, then try loading the view again.",
+                    "File Not Found", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+        }
+
+        if (_data == null || _columns == null) return;
+
+        _updating = true;
+
+        // Axis columns
+        if (root.TryGetProperty("xColumn", out var xc) && xc.ValueKind == JsonValueKind.String)
+            SetComboByText(cboX, xc.GetString()!);
+        if (root.TryGetProperty("yColumn", out var yc) && yc.ValueKind == JsonValueKind.String)
+            SetComboByText(cboY, yc.GetString()!);
+
+        // Appearance columns
+        if (root.TryGetProperty("colorColumn", out var cc))
+            SetComboByText(cboColor, cc.ValueKind == JsonValueKind.Null ? "(none)" : cc.GetString()!);
+        if (root.TryGetProperty("shapeColumn", out var sc))
+            SetComboByText(cboShapeCol, sc.ValueKind == JsonValueKind.Null ? "(none)" : sc.GetString()!);
+        if (root.TryGetProperty("sizeColumn", out var szc))
+            SetComboByText(cboSizeCol, szc.ValueKind == JsonValueKind.Null ? "(none)" : szc.GetString()!);
+        if (root.TryGetProperty("labelColumn", out var lc))
+            SetComboByText(cboLabelCol, lc.ValueKind == JsonValueKind.Null ? "(none)" : lc.GetString()!);
+
+        // Checkboxes
+        if (root.TryGetProperty("logX", out var lx)) chkLogX.IsChecked = lx.GetBoolean();
+        if (root.TryGetProperty("logY", out var ly)) chkLogY.IsChecked = ly.GetBoolean();
+        if (root.TryGetProperty("invertX", out var ix)) chkInvertX.IsChecked = ix.GetBoolean();
+        if (root.TryGetProperty("invertY", out var iy)) chkInvertY.IsChecked = iy.GetBoolean();
+        if (root.TryGetProperty("logColor", out var lcol)) chkLogColor.IsChecked = lcol.GetBoolean();
+        if (root.TryGetProperty("reverseColor", out var rc)) chkReverseColor.IsChecked = rc.GetBoolean();
+        if (root.TryGetProperty("logSize", out var lsz)) chkLogSize.IsChecked = lsz.GetBoolean();
+        if (root.TryGetProperty("reverseSize", out var rsz)) chkReverseSize.IsChecked = rsz.GetBoolean();
+
+        // Preset colour and shape
+        if (root.TryGetProperty("presetColorIndex", out var pci)) cboPresetColor.SelectedIndex = Math.Clamp(pci.GetInt32(), 0, cboPresetColor.Items.Count - 1);
+        if (root.TryGetProperty("shapeIndex", out var si)) cboShape.SelectedIndex = Math.Clamp(si.GetInt32(), 0, cboShape.Items.Count - 1);
+        if (root.TryGetProperty("sliderSize", out var ss)) sliderSize.Value = ss.GetDouble();
+
+        // Axis ranges
+        if (root.TryGetProperty("xMin", out var xmin)) txtXMin.Text = xmin.GetString() ?? "";
+        if (root.TryGetProperty("xMax", out var xmax)) txtXMax.Text = xmax.GetString() ?? "";
+        if (root.TryGetProperty("yMin", out var ymin)) txtYMin.Text = ymin.GetString() ?? "";
+        if (root.TryGetProperty("yMax", out var ymax)) txtYMax.Text = ymax.GetString() ?? "";
+
+        // Category colour overrides
+        _categoryColorOverrides.Clear();
+        if (root.TryGetProperty("categoryColorOverrides", out var cco) && cco.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in cco.EnumerateObject())
+                _categoryColorOverrides[prop.Name] = prop.Value.GetString()!;
+        }
+
+        // Numeric filters
+        _numericFilters.Clear();
+        if (root.TryGetProperty("numericFilters", out var nf) && nf.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in nf.EnumerateObject())
+            {
+                if (prop.Value.TryGetProperty("min", out var minv) && prop.Value.TryGetProperty("max", out var maxv))
+                    _numericFilters[prop.Name] = (minv.GetDouble(), maxv.GetDouble());
+            }
+        }
+
+        // Categorical filters
+        _categoricalFilters.Clear();
+        if (root.TryGetProperty("categoricalFilters", out var cf) && cf.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in cf.EnumerateObject())
+            {
+                if (prop.Value.ValueKind == JsonValueKind.Array)
+                {
+                    var set = new HashSet<string>();
+                    foreach (var item in prop.Value.EnumerateArray())
+                        if (item.ValueKind == JsonValueKind.String) set.Add(item.GetString()!);
+                    _categoricalFilters[prop.Name] = set;
+                }
+            }
+        }
+
+        // Identity line
+        if (root.TryGetProperty("showIdentityLine", out var sil)) _showIdentityLine = sil.GetBoolean();
+        if (root.TryGetProperty("identityLineColor", out var ilc) && ilc.ValueKind == JsonValueKind.String)
+            _identityLineColor = ParseHexColor(ilc.GetString()!);
+        if (root.TryGetProperty("identityLineWidth", out var ilw)) _identityLineWidth = (float)ilw.GetDouble();
+        if (root.TryGetProperty("identityLineDashed", out var ild)) _identityLineDashed = ild.GetBoolean();
+
+        // Cartesian axes
+        if (root.TryGetProperty("showCartesianAxes", out var sca)) _showCartesianAxes = sca.GetBoolean();
+
+        // Label font
+        if (root.TryGetProperty("labelFontFamily", out var lff) && lff.ValueKind == JsonValueKind.String)
+            _labelFontFamily = lff.GetString()!;
+        if (root.TryGetProperty("labelFontSize", out var lfs)) _labelFontSize = (float)lfs.GetDouble();
+        if (root.TryGetProperty("labelFontColor", out var lfcol) && lfcol.ValueKind == JsonValueKind.String)
+            _labelFontColor = ParseHexColor(lfcol.GetString()!);
+
+        // Regression
+        _regressionCoeffs = null;
+        _regressionPredictors = null;
+        _regressionResponse = null;
+        if (root.TryGetProperty("regressionCoeffs", out var rcoeffs) && rcoeffs.ValueKind == JsonValueKind.Array)
+        {
+            _regressionCoeffs = rcoeffs.EnumerateArray().Select(v => v.GetDouble()).ToArray();
+            if (root.TryGetProperty("regressionPredictors", out var rpred) && rpred.ValueKind == JsonValueKind.Array)
+                _regressionPredictors = rpred.EnumerateArray().Select(v => v.GetString()!).ToArray();
+            if (root.TryGetProperty("regressionResponse", out var rresp) && rresp.ValueKind == JsonValueKind.String)
+                _regressionResponse = rresp.GetString();
+            if (root.TryGetProperty("regressionOrder", out var rord)) _regressionOrder = rord.GetInt32();
+            if (root.TryGetProperty("regressionLogResponse", out var rlr)) _regressionLogResponse = rlr.GetBoolean();
+            if (root.TryGetProperty("regressionLogPredictors", out var rlp)) _regressionLogPredictors = rlp.GetBoolean();
+            if (root.TryGetProperty("regLineColor", out var rlc) && rlc.ValueKind == JsonValueKind.String)
+                _regLineColor = ParseHexColor(rlc.GetString()!);
+            if (root.TryGetProperty("regLineWidth", out var rlw)) _regLineWidth = (float)rlw.GetDouble();
+            if (root.TryGetProperty("regLineDashed", out var rld)) _regLineDashed = rld.GetBoolean();
+        }
+
+        _updating = false;
+
+        // Rebuild filters UI to reflect loaded state, then recompute
+        BuildFilterPanel();
+        RecomputeFilteredRows();
+
+        // Restore selection
+        _selectedRows.Clear();
+        if (root.TryGetProperty("selectedRows", out var sr) && sr.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in sr.EnumerateArray())
+                if (item.TryGetInt32(out int idx) && idx >= 0 && idx < (_data?.Rows.Count ?? 0))
+                    _selectedRows.Add(idx);
+        }
+
+        UpdatePlot();
+        UpdateSelectionDisplay();
+
+        // Rebuild statistics panel
+        statsPanel.Children.Clear();
+        if (_regressionCoeffs != null && _regressionPredictors != null && _regressionResponse != null)
+        {
+            string yLabel = _regressionLogResponse ? $"log\u2081\u2080({_regressionResponse})" : _regressionResponse;
+            var dispPreds = new List<string>();
+            foreach (var p in _regressionPredictors)
+            {
+                string lbl = _regressionLogPredictors ? $"log\u2081\u2080({p})" : p;
+                dispPreds.Add(lbl);
+            }
+            if (_regressionPredictors.Length == 1 && _regressionOrder > 1)
+            {
+                dispPreds.Clear();
+                string baseName = _regressionLogPredictors ? $"log\u2081\u2080({_regressionPredictors[0]})" : _regressionPredictors[0];
+                for (int o = 1; o <= _regressionOrder; o++)
+                    dispPreds.Add(o == 1 ? baseName : baseName + SuperscriptDigits(o));
+            }
+            string modelDesc = $"{yLabel} ~ {string.Join(" + ", dispPreds)}";
+            statsPanel.Children.Add(new TextBlock { Text = modelDesc, FontWeight = FontWeights.SemiBold, FontSize = 11, TextWrapping = TextWrapping.Wrap });
+            statsPanel.Children.Add(new TextBlock { Text = "(restored from journal — refit for full stats)", FontSize = 10, Foreground = Brushes.Gray, Margin = new Thickness(0, 2, 0, 6) });
+
+            var btnClear = new Button { Content = "Clear Model", Padding = new Thickness(8, 3, 8, 3), HorizontalAlignment = System.Windows.HorizontalAlignment.Left, Margin = new Thickness(0, 4, 0, 0) };
+            btnClear.Click += (s2, e2) => ClearRegressionModel();
+            statsPanel.Children.Add(btnClear);
+        }
+        else
+            statsPanel.Children.Add(new TextBlock { Text = "(no model fitted)", FontSize = 11, Foreground = Brushes.Gray });
+        AddIdentityLineControls();
+    }
+
+    private void MenuJournalEdit_Click(object sender, RoutedEventArgs e)
+    {
+        // Pick a journal file if none set
+        string? journalFile = _journalPath;
+        if (journalFile == null || !File.Exists(journalFile))
+        {
+            var dlg = new OpenFileDialog
+            {
+                Title = "Open journal file to edit",
+                Filter = "HTML files|*.html|All files|*.*",
+                InitialDirectory = _filePath != null ? System.IO.Path.GetDirectoryName(_filePath) : ""
+            };
+            if (dlg.ShowDialog() != true) return;
+            journalFile = dlg.FileName;
+            _journalPath = journalFile;
+        }
+
+        string html = File.ReadAllText(journalFile, Encoding.UTF8);
+        var entries = ParseJournalEntriesFull(html);
+        if (entries.Count == 0)
+        {
+            MessageBox.Show("No entries found in journal file.", "Edit Journal", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        // Build editor window
+        var win = new Window
+        {
+            Title = $"Edit Journal — {System.IO.Path.GetFileName(journalFile)}",
+            Width = 820, Height = 700,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Owner = this
+        };
+
+        var rootDock = new DockPanel();
+
+        // Top toolbar
+        var toolbar = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal, Margin = new Thickness(10, 8, 10, 8) };
+        var btnSave = new Button { Content = "Save", Padding = new Thickness(14, 4, 14, 4), FontWeight = FontWeights.SemiBold };
+        var btnAddNote = new Button { Content = "Add note (no image)", Padding = new Thickness(14, 4, 14, 4), Margin = new Thickness(10, 0, 0, 0) };
+        var statusText = new TextBlock { Margin = new Thickness(14, 0, 0, 0), VerticalAlignment = System.Windows.VerticalAlignment.Center, Foreground = Brushes.Gray };
+        toolbar.Children.Add(btnSave);
+        toolbar.Children.Add(btnAddNote);
+        toolbar.Children.Add(statusText);
+        DockPanel.SetDock(toolbar, Dock.Top);
+        rootDock.Children.Add(toolbar);
+
+        // Scrollable entries panel
+        var scrollViewer = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Padding = new Thickness(10, 0, 10, 10) };
+        var entriesPanel = new StackPanel();
+
+        // Track TextBox → entry mapping for save
+        var entryControls = new List<(JournalEntry entry, TextBox annotationBox)>();
+
+        foreach (var entry in entries)
+        {
+            var card = new Border
+            {
+                BorderBrush = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xDD, 0xDD, 0xDD)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(5),
+                Padding = new Thickness(12),
+                Margin = new Thickness(0, 0, 0, 12),
+                Background = Brushes.White
+            };
+            var cardStack = new StackPanel();
+
+            // Header row: timestamp + summary + delete button
+            var headerRow = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
+            var btnDelete = new Button { Content = "Delete", Padding = new Thickness(8, 2, 8, 2), Foreground = Brushes.Red, FontSize = 11 };
+            DockPanel.SetDock(btnDelete, Dock.Right);
+            headerRow.Children.Add(btnDelete);
+            var headerText = new TextBlock
+            {
+                FontWeight = FontWeights.SemiBold, FontSize = 13,
+                Text = entry.Timestamp,
+                VerticalAlignment = System.Windows.VerticalAlignment.Center
+            };
+            headerRow.Children.Add(headerText);
+            cardStack.Children.Add(headerRow);
+
+            if (!string.IsNullOrEmpty(entry.Summary))
+            {
+                cardStack.Children.Add(new TextBlock
+                {
+                    Text = entry.Summary, FontSize = 11, Foreground = Brushes.Gray,
+                    Margin = new Thickness(0, 0, 0, 6)
+                });
+            }
+
+            // Thumbnail image
+            if (!string.IsNullOrEmpty(entry.Base64Image))
+            {
+                try
+                {
+                    var bitmapImg = new System.Windows.Media.Imaging.BitmapImage();
+                    bitmapImg.BeginInit();
+                    bitmapImg.StreamSource = new MemoryStream(Convert.FromBase64String(entry.Base64Image));
+                    bitmapImg.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+                    bitmapImg.EndInit();
+                    bitmapImg.Freeze();
+                    var img = new System.Windows.Controls.Image
+                    {
+                        Source = bitmapImg,
+                        MaxHeight = 300,
+                        HorizontalAlignment = System.Windows.HorizontalAlignment.Left,
+                        Margin = new Thickness(0, 0, 0, 6)
+                    };
+                    cardStack.Children.Add(img);
+                }
+                catch { }
+            }
+
+            // Editable annotation
+            cardStack.Children.Add(new TextBlock { Text = "Annotation:", FontSize = 11, Foreground = Brushes.Gray, Margin = new Thickness(0, 0, 0, 2) });
+            var txtAnn = new TextBox
+            {
+                Text = entry.Annotation,
+                AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
+                MinHeight = 50, MaxHeight = 200,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                FontSize = 12,
+                Padding = new Thickness(4)
+            };
+            cardStack.Children.Add(txtAnn);
+
+            card.Child = cardStack;
+            entriesPanel.Children.Add(card);
+            entryControls.Add((entry, txtAnn));
+
+            // Wire delete button — capture references
+            var capturedCard = card;
+            var capturedEntry = entry;
+            btnDelete.Click += (s, ev) =>
+            {
+                var result = MessageBox.Show($"Delete entry from {capturedEntry.Timestamp}?",
+                    "Delete Entry", MessageBoxButton.YesNo, MessageBoxImage.Question);
+                if (result == MessageBoxResult.Yes)
+                {
+                    capturedEntry.Deleted = true;
+                    capturedCard.Visibility = Visibility.Collapsed;
+                    statusText.Text = "Entry marked for deletion — click Save to apply.";
+                    statusText.Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xD6, 0x27, 0x28));
+                }
+            };
+        }
+
+        scrollViewer.Content = entriesPanel;
+        rootDock.Children.Add(scrollViewer);
+        win.Content = rootDock;
+
+        // Add note button
+        btnAddNote.Click += (s, ev) =>
+        {
+            var newEntry = new JournalEntry
+            {
+                Timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+                Summary = "Text note"
+            };
+            entries.Add(newEntry);
+
+            var card = new Border
+            {
+                BorderBrush = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xDD, 0xDD, 0xDD)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(5),
+                Padding = new Thickness(12),
+                Margin = new Thickness(0, 0, 0, 12),
+                Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFF, 0xFD, 0xE7))
+            };
+            var cardStack = new StackPanel();
+            var headerRow = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
+            var btnDel = new Button { Content = "Delete", Padding = new Thickness(8, 2, 8, 2), Foreground = Brushes.Red, FontSize = 11 };
+            DockPanel.SetDock(btnDel, Dock.Right);
+            headerRow.Children.Add(btnDel);
+            headerRow.Children.Add(new TextBlock { Text = newEntry.Timestamp, FontWeight = FontWeights.SemiBold, FontSize = 13, VerticalAlignment = System.Windows.VerticalAlignment.Center });
+            cardStack.Children.Add(headerRow);
+            cardStack.Children.Add(new TextBlock { Text = "Annotation:", FontSize = 11, Foreground = Brushes.Gray, Margin = new Thickness(0, 0, 0, 2) });
+            var txtAnn = new TextBox
+            {
+                AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
+                MinHeight = 50, MaxHeight = 200,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                FontSize = 12, Padding = new Thickness(4)
+            };
+            cardStack.Children.Add(txtAnn);
+            card.Child = cardStack;
+            entriesPanel.Children.Add(card);
+            entryControls.Add((newEntry, txtAnn));
+
+            var capturedCard = card;
+            var capturedEntry = newEntry;
+            btnDel.Click += (s2, ev2) =>
+            {
+                capturedEntry.Deleted = true;
+                capturedCard.Visibility = Visibility.Collapsed;
+            };
+
+            txtAnn.Focus();
+            scrollViewer.ScrollToBottom();
+            statusText.Text = "Note added — click Save when done.";
+            statusText.Foreground = Brushes.Gray;
+        };
+
+        // Save button
+        btnSave.Click += (s, ev) =>
+        {
+            try
+            {
+                // Update annotations from TextBoxes
+                foreach (var (entry, box) in entryControls)
+                    entry.Annotation = box.Text.Trim();
+
+                // Rebuild HTML
+                var sb = new StringBuilder();
+                sb.AppendLine("<!DOCTYPE html>");
+                sb.AppendLine("<html lang=\"en\">");
+                sb.AppendLine("<head>");
+                sb.AppendLine("<meta charset=\"UTF-8\">");
+                sb.AppendLine("<title>Scatter Plot Explorer \u2014 Session Journal</title>");
+                sb.AppendLine("<style>");
+                sb.AppendLine("body { font-family: 'Segoe UI', Calibri, Arial, sans-serif; max-width: 1100px; margin: 0 auto; padding: 20px; background: #fafafa; color: #333; }");
+                sb.AppendLine("h1 { border-bottom: 2px solid #1F77B4; padding-bottom: 8px; color: #1F77B4; }");
+                sb.AppendLine(".entry { background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 20px; margin-bottom: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }");
+                sb.AppendLine(".entry h2 { margin-top: 0; font-size: 1.1em; color: #555; }");
+                sb.AppendLine(".entry img { max-width: 100%; border: 1px solid #eee; border-radius: 4px; margin: 10px 0; }");
+                sb.AppendLine(".annotation { background: #fffde7; border-left: 3px solid #f9a825; padding: 10px 14px; margin: 10px 0; border-radius: 0 4px 4px 0; }");
+                sb.AppendLine(".annotation p { margin: 4px 0; }");
+                sb.AppendLine(".summary { font-size: 0.9em; color: #777; margin: 2px 0 10px 0; }");
+                sb.AppendLine("details { margin-top: 10px; }");
+                sb.AppendLine("details summary { cursor: pointer; color: #1F77B4; font-size: 0.9em; }");
+                sb.AppendLine(".json-display { background: #f5f5f5; padding: 10px; border-radius: 4px; font-size: 0.8em; overflow-x: auto; max-height: 300px; overflow-y: auto; }");
+                sb.AppendLine("@media print { .entry { break-inside: avoid; } details { display: none; } }");
+                sb.AppendLine("</style>");
+                sb.AppendLine("</head>");
+                sb.AppendLine("<body>");
+                sb.AppendLine("<h1>Scatter Plot Explorer \u2014 Session Journal</h1>");
+
+                foreach (var entry in entries)
+                {
+                    if (entry.Deleted) continue;
+                    string entryId = $"entry-{entry.Timestamp.Replace(" ", "").Replace(":", "").Replace("-", "")}";
+                    sb.AppendLine($"<div class=\"entry\" id=\"{entryId}\">");
+                    sb.AppendLine($"  <h2>{System.Net.WebUtility.HtmlEncode(entry.Timestamp)}</h2>");
+                    if (!string.IsNullOrEmpty(entry.Summary))
+                        sb.AppendLine($"  <p class=\"summary\">{System.Net.WebUtility.HtmlEncode(entry.Summary)}</p>");
+                    if (!string.IsNullOrEmpty(entry.Base64Image))
+                        sb.AppendLine($"  <img src=\"data:image/png;base64,{entry.Base64Image}\" alt=\"Plot snapshot\"/>");
+                    if (!string.IsNullOrEmpty(entry.Annotation))
+                    {
+                        sb.AppendLine("  <div class=\"annotation\">");
+                        foreach (var line in entry.Annotation.Split('\n'))
+                            sb.AppendLine($"    <p>{System.Net.WebUtility.HtmlEncode(line.TrimEnd('\r'))}</p>");
+                        sb.AppendLine("  </div>");
+                    }
+                    if (!string.IsNullOrEmpty(entry.Json))
+                    {
+                        sb.AppendLine("  <details><summary>View state (JSON)</summary>");
+                        sb.AppendLine("  <script class=\"view-state\" type=\"application/json\">");
+                        sb.AppendLine(entry.Json);
+                        sb.AppendLine("  </script>");
+                        sb.AppendLine($"  <pre class=\"json-display\">{System.Net.WebUtility.HtmlEncode(entry.Json)}</pre>");
+                        sb.AppendLine("  </details>");
+                    }
+                    sb.AppendLine("</div>");
+                }
+
+                sb.AppendLine("</body>");
+                sb.AppendLine("</html>");
+
+                File.WriteAllText(journalFile!, sb.ToString(), Encoding.UTF8);
+                statusText.Text = $"Saved {entries.Count(en => !en.Deleted)} entries.";
+                statusText.Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x2C, 0xA0, 0x2C));
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error saving journal:\n{ex.Message}", "Save Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        };
+
+        win.Show();
+    }
+
+    private static void SetComboByText(ComboBox combo, string text)
+    {
+        for (int i = 0; i < combo.Items.Count; i++)
+        {
+            if (combo.Items[i].ToString() == text)
+            {
+                combo.SelectedIndex = i;
+                return;
+            }
+        }
     }
 
     // ====================================================================

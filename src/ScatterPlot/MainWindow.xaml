@@ -28,6 +28,17 @@
                 <MenuItem Header="Copy _R Code" Click="MenuCopyRCode_Click"
                           x:Name="menuCopyRCode" IsEnabled="False"/>
             </MenuItem>
+            <MenuItem Header="_Journal">
+                <MenuItem Header="_Publish / Append view..." Click="MenuJournalPublish_Click"
+                          x:Name="menuJournalPublish" IsEnabled="False"/>
+                <MenuItem Header="_Edit journal..." Click="MenuJournalEdit_Click"
+                          x:Name="menuJournalEdit"/>
+                <Separator/>
+                <MenuItem Header="_Open in browser" Click="MenuJournalOpen_Click"
+                          x:Name="menuJournalOpen"/>
+                <MenuItem Header="_Load view from journal..." Click="MenuJournalLoad_Click"
+                          x:Name="menuJournalLoad"/>
+            </MenuItem>
         </Menu>
 
         <Grid Margin="6">
@@ -127,7 +138,7 @@
                     </StackPanel>
 
                     <TextBlock Text="Single colour" FontSize="11" Foreground="Gray"/>
-                    <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
                         <Rectangle x:Name="rectColor" Width="24" Height="24"
                                    Stroke="#999" StrokeThickness="1" RadiusX="3" RadiusY="3"
                                    Fill="#1F77B4" Cursor="Hand"
@@ -135,6 +146,9 @@
                         <ComboBox x:Name="cboPresetColor" Width="140" Margin="6,0,0,0"
                                   SelectionChanged="PresetColor_Changed"/>
                     </StackPanel>
+                    <CheckBox x:Name="chkColorSelected" Content="Colour selected"
+                              FontSize="11" Margin="0,0,0,6"
+                              ToolTip="When checked, changing the colour above applies permanently to selected points"/>
 
                     <Separator Margin="0,4"/>
 
