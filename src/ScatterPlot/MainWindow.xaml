@@ -91,6 +91,8 @@
                       HorizontalScrollBarVisibility="Auto"
                       SelectionMode="Extended" SelectionUnit="FullRow"
                       SelectionChanged="DgSelected_SelectionChanged"
+                      Sorting="DgSelected_Sorting"
+                      AutoGeneratingColumn="DgSelected_AutoGeneratingColumn"
                       FontSize="12">
                 <DataGrid.ContextMenu>
                     <ContextMenu>
@@ -116,7 +118,13 @@
 
                     <TextBlock Text="Colour" FontWeight="Bold" FontSize="13" Margin="0,6,0,4"/>
                     <TextBlock Text="Colour by column" FontSize="11" Foreground="Gray"/>
-                    <ComboBox x:Name="cboColor" SelectionChanged="Appearance_Changed" Margin="0,0,0,6"/>
+                    <ComboBox x:Name="cboColor" SelectionChanged="Appearance_Changed" Margin="0,0,0,4"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                        <CheckBox x:Name="chkLogColor" Content="Log10" Margin="0,0,10,0"
+                                  FontSize="11" Checked="Appearance_Changed" Unchecked="Appearance_Changed"/>
+                        <CheckBox x:Name="chkReverseColor" Content="Reverse"
+                                  FontSize="11" Checked="Appearance_Changed" Unchecked="Appearance_Changed"/>
+                    </StackPanel>
 
                     <TextBlock Text="Single colour" FontSize="11" Foreground="Gray"/>
                     <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
@@ -136,8 +144,19 @@
                     <TextBlock Text="Single shape" FontSize="11" Foreground="Gray"/>
                     <ComboBox x:Name="cboShape" SelectionChanged="Appearance_Changed" Margin="0,0,0,6"/>
 
+                    <TextBlock Text="Label by column" FontSize="11" Foreground="Gray"/>
+                    <ComboBox x:Name="cboLabelCol" SelectionChanged="Appearance_Changed" Margin="0,0,0,4"/>
+                    <Button x:Name="btnLabelFont" Content="Font properties..." Click="BtnLabelFont_Click"
+                            Padding="6,2" FontSize="11" HorizontalAlignment="Left" Margin="0,0,0,6"/>
+
                     <TextBlock Text="Size by column" FontSize="11" Foreground="Gray"/>
-                    <ComboBox x:Name="cboSizeCol" SelectionChanged="Appearance_Changed" Margin="0,0,0,6"/>
+                    <ComboBox x:Name="cboSizeCol" SelectionChanged="Appearance_Changed" Margin="0,0,0,4"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                        <CheckBox x:Name="chkLogSize" Content="Log10" Margin="0,0,10,0"
+                                  FontSize="11" Checked="Appearance_Changed" Unchecked="Appearance_Changed"/>
+                        <CheckBox x:Name="chkReverseSize" Content="Reverse"
+                                  FontSize="11" Checked="Appearance_Changed" Unchecked="Appearance_Changed"/>
+                    </StackPanel>
                     <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
                         <TextBlock Text="Single size" FontSize="11" Foreground="Gray" VerticalAlignment="Center"/>
                         <Slider x:Name="sliderSize" Minimum="2" Maximum="30" Value="8"

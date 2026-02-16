@@ -1,9 +1,11 @@
+using System.ComponentModel;
 using System.Data;
 using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Shapes;
@@ -80,6 +82,14 @@ public partial class MainWindow : Window
     private ScottPlot.Color _identityLineColor = new ScottPlot.Color(140, 140, 140);
     private float _identityLineWidth = 2;
     private bool _identityLineDashed = true;
+
+    // Cartesian axes (x=0, y=0 lines)
+    private bool _showCartesianAxes;
+
+    // label font properties
+    private string _labelFontFamily = "Segoe UI";
+    private float _labelFontSize = 10;
+    private ScottPlot.Color _labelFontColor = ScottPlot.Colors.Black;
 
     // categorical colour overrides (category value → hex like "#FF7F0E")
     private Dictionary<string, string> _categoryColorOverrides = new();
@@ -494,6 +504,8 @@ public partial class MainWindow : Window
 
         cboColor.Items.Add("(none)");
         cboShapeCol.Items.Add("(none)");
+        cboLabelCol.Items.Clear();
+        cboLabelCol.Items.Add("(none)");
         cboSizeCol.Items.Add("(none)");
 
         foreach (var c in _columns!)
@@ -502,6 +514,7 @@ public partial class MainWindow : Window
             cboY.Items.Add(c);
             cboColor.Items.Add(c);
             cboShapeCol.Items.Add(c);
+            cboLabelCol.Items.Add(c);
             cboSizeCol.Items.Add(c);
         }
 
@@ -519,6 +532,7 @@ public partial class MainWindow : Window
         cboY.SelectedIndex = secondNum >= 0 ? secondNum : (firstNum >= 0 ? firstNum : (_columns.Length >= 2 ? 1 : 0));
         cboColor.SelectedIndex = 0;
         cboShapeCol.SelectedIndex = 0;
+        cboLabelCol.SelectedIndex = 0;
         cboSizeCol.SelectedIndex = 0;
         _updating = false;
 
@@ -689,21 +703,28 @@ public partial class MainWindow : Window
         }
         else if (useColorCol && IsNumericColumn(colorCol!))
         {
+            bool logColor = chkLogColor.IsChecked == true;
             double cmin = double.MaxValue, cmax = double.MinValue;
             double[] cvals = new double[n];
             for (int i = 0; i < n; i++)
             {
                 string s = _data.Rows[i][colorCol!].ToString()!;
                 if (double.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out double v))
-                { cvals[i] = v; if (v < cmin) cmin = v; if (v > cmax) cmax = v; }
+                {
+                    if (logColor) v = v > 0 ? Math.Log10(v) : double.NaN;
+                    cvals[i] = v;
+                    if (!double.IsNaN(v)) { if (v < cmin) cmin = v; if (v > cmax) cmax = v; }
+                }
                 else cvals[i] = double.NaN;
             }
+            bool reverseColor = chkReverseColor.IsChecked == true;
             double crange = cmax - cmin; if (crange == 0) crange = 1;
             for (int i = 0; i < n; i++)
             {
                 if (double.IsNaN(cvals[i]))
                 { pointColors[i] = new ScottPlot.Color(180, 180, 180); continue; }
                 double t = (cvals[i] - cmin) / crange;
+                if (reverseColor) t = 1 - t;
                 byte r = (byte)(255 * t);
                 byte g = (byte)(60 * (1 - Math.Abs(2 * t - 1)));
                 byte b = (byte)(255 * (1 - t));
@@ -745,20 +766,27 @@ public partial class MainWindow : Window
         float[] pointSizes = new float[n];
         if (useSizeCol && IsNumericColumn(sizeCol!))
         {
+            bool logSize = chkLogSize.IsChecked == true;
             double smin = double.MaxValue, smax = double.MinValue;
             double[] svals = new double[n];
             for (int i = 0; i < n; i++)
             {
                 string s = _data.Rows[i][sizeCol!].ToString()!;
                 if (double.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out double v))
-                { svals[i] = v; if (v < smin) smin = v; if (v > smax) smax = v; }
+                {
+                    if (logSize) v = v > 0 ? Math.Log10(v) : double.NaN;
+                    svals[i] = v;
+                    if (!double.IsNaN(v)) { if (v < smin) smin = v; if (v > smax) smax = v; }
+                }
                 else svals[i] = double.NaN;
             }
+            bool reverseSize = chkReverseSize.IsChecked == true;
             double srange = smax - smin; if (srange == 0) srange = 1;
             for (int i = 0; i < n; i++)
             {
                 if (double.IsNaN(svals[i])) { pointSizes[i] = baseSize; continue; }
                 double t = (svals[i] - smin) / srange;
+                if (reverseSize) t = 1 - t;
                 pointSizes[i] = 3f + (float)(t * 25);
             }
         }
@@ -778,7 +806,7 @@ public partial class MainWindow : Window
         }
 
         // --- Render points grouped by (color, shape, size) or individually ---
-        bool needsPerPoint = useSizeCol; // size varies per point → individual
+        bool needsPerPoint = useSizeCol || (useColorCol && IsNumericColumn(colorCol!)); // per-point when size or numeric colour varies
         if (needsPerPoint)
         {
             for (int i = 0; i < n; i++)
@@ -817,6 +845,29 @@ public partial class MainWindow : Window
                 sp.MarkerSize = baseSize;
                 sp.MarkerShape = useShapeCol && si < Shapes.Length ? Shapes[si % Shapes.Length].Shape : baseShape;
                 sp.Color = useColorCol ? (ci < colorCategories.Length && catColorMap.ContainsKey(colorCategories[ci]) ? catColorMap[colorCategories[ci]] : ci < colorCategories.Length ? palette.GetColor(ci) : baseColor) : baseColor;
+            }
+        }
+
+        // --- Draw point labels (selected points only) ---
+        string? labelCol = cboLabelCol.SelectedItem?.ToString();
+        bool useLabelCol = labelCol != null && labelCol != "(none)" && _data.Columns.Contains(labelCol);
+        if (useLabelCol && _selectedRows.Count > 0)
+        {
+            for (int i = 0; i < n; i++)
+            {
+                if (!_selectedRows.Contains(i)) continue;
+                if (!IsRowVisible(i)) continue;
+                if (double.IsNaN(_plotX[i]) || double.IsNaN(_plotY[i])) continue;
+                string label = _data.Rows[i][labelCol!]?.ToString() ?? "";
+                if (string.IsNullOrEmpty(label) || label == "NA") continue;
+                var txt = plot.Add.Text(label, _plotX[i], _plotY[i]);
+                txt.LabelFontSize = _labelFontSize;
+                txt.LabelFontColor = _labelFontColor;
+                txt.LabelFontName = _labelFontFamily;
+                txt.LabelOffsetX = pointSizes[i] / 2 + 3;
+                txt.LabelOffsetY = -pointSizes[i] / 2;
+                txt.LabelBorderWidth = 0;
+                txt.LabelBackgroundColor = ScottPlot.Colors.Transparent;
             }
         }
 
@@ -884,6 +935,35 @@ public partial class MainWindow : Window
                 idLine.LineWidth = _identityLineWidth;
                 idLine.Color = _identityLineColor;
                 idLine.LinePattern = _identityLineDashed ? ScottPlot.LinePattern.Dashed : ScottPlot.LinePattern.Solid;
+            }
+        }
+
+        // --- Draw Cartesian axes (x=0, y=0 lines) ---
+        if (_showCartesianAxes && xNumeric && yNumeric)
+        {
+            var axisColor = new ScottPlot.Color(100, 100, 100);
+            // y=0 horizontal line (if 0 is within Y data range)
+            if (_dataYMin <= 0 && _dataYMax >= 0)
+            {
+                double y0 = logY ? 0 : 0; // log10(1)=0, so y=0 in log space means original value 1
+                if (!logY || (_dataYMin <= 0 && _dataYMax >= 0))
+                {
+                    var hLine = plot.Add.Scatter(new[] { _dataXMin, _dataXMax }, new[] { y0, y0 });
+                    hLine.MarkerSize = 0;
+                    hLine.LineWidth = 1;
+                    hLine.Color = axisColor;
+                    hLine.LinePattern = ScottPlot.LinePattern.DenselyDashed;
+                }
+            }
+            // x=0 vertical line (if 0 is within X data range)
+            if (_dataXMin <= 0 && _dataXMax >= 0)
+            {
+                double x0 = 0;
+                var vLine = plot.Add.Scatter(new[] { x0, x0 }, new[] { _dataYMin, _dataYMax });
+                vLine.MarkerSize = 0;
+                vLine.LineWidth = 1;
+                vLine.Color = axisColor;
+                vLine.LinePattern = ScottPlot.LinePattern.DenselyDashed;
             }
         }
 
@@ -1204,8 +1284,11 @@ public partial class MainWindow : Window
         colorBy.Click += FilterContext_Click;
         var sizeBy = new MenuItem { Header = "Size by this column", Tag = $"fctx:size:{col}" };
         sizeBy.Click += FilterContext_Click;
+        var labelBy = new MenuItem { Header = "Label by this column", Tag = $"fctx:label:{col}" };
+        labelBy.Click += FilterContext_Click;
         ctx.Items.Add(colorBy);
         ctx.Items.Add(sizeBy);
+        ctx.Items.Add(labelBy);
         grid.ContextMenu = ctx;
 
         expander.Content = grid;
@@ -1285,11 +1368,14 @@ public partial class MainWindow : Window
         colorBy.Click += FilterContext_Click;
         var sizeBy = new MenuItem { Header = "Size by this column", Tag = $"fctx:size:{col}" };
         sizeBy.Click += FilterContext_Click;
+        var labelBy2 = new MenuItem { Header = "Label by this column", Tag = $"fctx:label:{col}" };
+        labelBy2.Click += FilterContext_Click;
         ctx.Items.Add(selectAll);
         ctx.Items.Add(selectNone);
         ctx.Items.Add(new Separator());
         ctx.Items.Add(colorBy);
         ctx.Items.Add(sizeBy);
+        ctx.Items.Add(labelBy2);
         stack.ContextMenu = ctx;
 
         scrollViewer.Content = stack;
@@ -1424,6 +1510,19 @@ public partial class MainWindow : Window
                 if (cboSizeCol.Items[i].ToString() == col)
                 {
                     cboSizeCol.SelectedIndex = i;
+                    break;
+                }
+            }
+            return;
+        }
+
+        if (action == "label")
+        {
+            for (int i = 0; i < cboLabelCol.Items.Count; i++)
+            {
+                if (cboLabelCol.Items[i].ToString() == col)
+                {
+                    cboLabelCol.SelectedIndex = i;
                     break;
                 }
             }
@@ -1968,6 +2067,19 @@ public partial class MainWindow : Window
                     BroadcastFilterChange();
                 };
                 cm.Items.Add(showAll);
+                cm.Items.Add(new Separator());
+                var cartesian = new MenuItem
+                {
+                    Header = "Draw Cartesian axes",
+                    IsCheckable = true,
+                    IsChecked = _showCartesianAxes
+                };
+                cartesian.Click += (s, args) =>
+                {
+                    _showCartesianAxes = !_showCartesianAxes;
+                    UpdatePlot(true);
+                };
+                cm.Items.Add(cartesian);
                 if (_selectedRows.Count > 0)
                 {
                     cm.Items.Add(new Separator());
@@ -2298,6 +2410,11 @@ public partial class MainWindow : Window
     {
         if (_data == null) { dgSelected.ItemsSource = null; return; }
 
+        // Save horizontal scroll position before replacing ItemsSource
+        double hOffset = 0;
+        var sv = GetDataGridScrollViewer(dgSelected);
+        if (sv != null) hOffset = sv.HorizontalOffset;
+
         if (_selectedRows.Count == 0)
         {
             // Show all data when nothing is selected
@@ -2305,17 +2422,35 @@ public partial class MainWindow : Window
             txtSelCount.Text = $"({_data.Rows.Count} rows total)";
             btnCopy.IsEnabled = false;
             menuCopySelected.IsEnabled = false;
-            return;
+        }
+        else
+        {
+            var view = _data.Clone();
+            foreach (int idx in _selectedRows.OrderBy(i => i))
+                if (idx < _data.Rows.Count)
+                    view.ImportRow(_data.Rows[idx]);
+            dgSelected.ItemsSource = view.DefaultView;
+            txtSelCount.Text = $"({_selectedRows.Count} selected)";
+            btnCopy.IsEnabled = true;
+            menuCopySelected.IsEnabled = true;
         }
 
-        var view = _data.Clone();
-        foreach (int idx in _selectedRows.OrderBy(i => i))
-            if (idx < _data.Rows.Count)
-                view.ImportRow(_data.Rows[idx]);
-        dgSelected.ItemsSource = view.DefaultView;
-        txtSelCount.Text = $"({_selectedRows.Count} selected)";
-        btnCopy.IsEnabled = true;
-        menuCopySelected.IsEnabled = true;
+        // Restore horizontal scroll position after layout updates
+        if (sv != null && hOffset > 0)
+            dgSelected.Dispatcher.BeginInvoke(() => sv.ScrollToHorizontalOffset(hOffset),
+                System.Windows.Threading.DispatcherPriority.Loaded);
+    }
+
+    private static ScrollViewer? GetDataGridScrollViewer(DependencyObject d)
+    {
+        for (int i = 0; i < System.Windows.Media.VisualTreeHelper.GetChildrenCount(d); i++)
+        {
+            var child = System.Windows.Media.VisualTreeHelper.GetChild(d, i);
+            if (child is ScrollViewer sv) return sv;
+            var result = GetDataGridScrollViewer(child);
+            if (result != null) return result;
+        }
+        return null;
     }
 
     // ====================================================================
@@ -2342,6 +2477,113 @@ public partial class MainWindow : Window
             }
         }
         UpdatePlot(true);
+    }
+
+    private void DgSelected_AutoGeneratingColumn(object sender, DataGridAutoGeneratingColumnEventArgs e)
+    {
+        var style = new Style(typeof(DataGridColumnHeader));
+        style.Setters.Add(new EventSetter(FrameworkElement.ContextMenuOpeningEvent,
+            new ContextMenuEventHandler(ColumnHeader_ContextMenuOpening)));
+        style.Setters.Add(new Setter(FrameworkElement.ContextMenuProperty, new ContextMenu()));
+        e.Column.HeaderStyle = style;
+    }
+
+    private void ColumnHeader_ContextMenuOpening(object sender, ContextMenuEventArgs e)
+    {
+        if (sender is not DataGridColumnHeader header) return;
+        string colName = header.Content?.ToString() ?? "";
+        bool hasSelection = _selectedRows.Count > 0;
+
+        var menu = new ContextMenu();
+
+        var copyName = new MenuItem { Header = "Copy column name" };
+        copyName.Click += (_, _) => Clipboard.SetText(colName);
+        menu.Items.Add(copyName);
+
+        var copyAll = new MenuItem { Header = "Copy column data" };
+        copyAll.Click += (_, _) => CopyColumnData(colName, false);
+        menu.Items.Add(copyAll);
+
+        var copySel = new MenuItem { Header = "Copy column data (selected rows)", IsEnabled = hasSelection };
+        copySel.Click += (_, _) => CopyColumnData(colName, true);
+        menu.Items.Add(copySel);
+
+        var copyRows = new MenuItem { Header = "Copy all selected rows", IsEnabled = hasSelection };
+        copyRows.Click += (_, _) => CopySelectedToClipboard();
+        menu.Items.Add(copyRows);
+
+        header.ContextMenu = menu;
+    }
+
+    private void CopyColumnData(string colName, bool selectedOnly)
+    {
+        if (_data == null) return;
+        var sb = new StringBuilder();
+        sb.AppendLine(colName);
+        if (selectedOnly)
+        {
+            foreach (int idx in _selectedRows.OrderBy(i => i))
+                if (idx < _data.Rows.Count)
+                    sb.AppendLine(_data.Rows[idx][colName]?.ToString() ?? "");
+        }
+        else
+        {
+            if (dgSelected.ItemsSource is DataView dv)
+                foreach (DataRowView drv in dv)
+                    sb.AppendLine(drv[colName]?.ToString() ?? "");
+        }
+        Clipboard.SetText(sb.ToString());
+    }
+
+    private void DgSelected_Sorting(object sender, DataGridSortingEventArgs e)
+    {
+        string colName = e.Column.Header?.ToString() ?? "";
+        if (_data == null || !IsNumericColumn(colName)) return;
+
+        e.Handled = true;
+
+        var direction = (e.Column.SortDirection == ListSortDirection.Ascending)
+            ? ListSortDirection.Descending
+            : ListSortDirection.Ascending;
+        e.Column.SortDirection = direction;
+
+        foreach (var col in dgSelected.Columns)
+            if (col != e.Column) col.SortDirection = null;
+
+        if (dgSelected.ItemsSource is DataView dv && dv.Table != null)
+        {
+            var rows = dv.Table.Rows.Cast<DataRow>().ToList();
+            rows.Sort((a, b) =>
+            {
+                bool ap = double.TryParse(a[colName]?.ToString() ?? "", NumberStyles.Any,
+                    CultureInfo.InvariantCulture, out double da);
+                bool bp = double.TryParse(b[colName]?.ToString() ?? "", NumberStyles.Any,
+                    CultureInfo.InvariantCulture, out double db);
+                if (!ap && !bp) return 0;
+                if (!ap) return 1;
+                if (!bp) return -1;
+                int cmp = da.CompareTo(db);
+                return direction == ListSortDirection.Descending ? -cmp : cmp;
+            });
+
+            var sorted = dv.Table.Clone();
+            foreach (var row in rows) sorted.ImportRow(row);
+
+            double hOffset = 0;
+            var sv = GetDataGridScrollViewer(dgSelected);
+            if (sv != null) hOffset = sv.HorizontalOffset;
+
+            _updating = true;
+            dgSelected.ItemsSource = sorted.DefaultView;
+            _updating = false;
+
+            if (sv != null && hOffset > 0)
+                dgSelected.Dispatcher.BeginInvoke(() =>
+                {
+                    var sv2 = GetDataGridScrollViewer(dgSelected);
+                    sv2?.ScrollToHorizontalOffset(hOffset);
+                }, System.Windows.Threading.DispatcherPriority.Loaded);
+        }
     }
 
     // ====================================================================
@@ -2514,7 +2756,10 @@ public partial class MainWindow : Window
         // --- Colour scale ---
         if (useColorCol && IsNumericColumn(colorCol!))
         {
-            sb.AppendLine("  scale_colour_gradient(low = \"blue\", high = \"red\") +");
+            string cLow = chkReverseColor.IsChecked == true ? "red" : "blue";
+            string cHigh = chkReverseColor.IsChecked == true ? "blue" : "red";
+            string cTrans = chkLogColor.IsChecked == true ? ", trans = \"log10\"" : "";
+            sb.AppendLine($"  scale_colour_gradient(low = \"{cLow}\", high = \"{cHigh}\"{cTrans}) +");
         }
         else if (useColorCol && _categoryColorOverrides.Count > 0)
         {
@@ -2535,6 +2780,15 @@ public partial class MainWindow : Window
                 }
             }
             sb.AppendLine($"  scale_colour_manual(values = c({string.Join(", ", colorValues)})) +");
+        }
+
+        // --- Size scale ---
+        if (useSizeCol && (chkLogSize.IsChecked == true || chkReverseSize.IsChecked == true))
+        {
+            var sizeArgs = new List<string>();
+            if (chkLogSize.IsChecked == true) sizeArgs.Add("trans = \"log10\"");
+            if (chkReverseSize.IsChecked == true) sizeArgs.Add("range = c(6, 1)");
+            sb.AppendLine($"  scale_size_continuous({string.Join(", ", sizeArgs)}) +");
         }
 
         // --- Log scales ---
@@ -2694,6 +2948,13 @@ public partial class MainWindow : Window
     private void Appearance_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (_updating) return;
+        // When a colour-by column is chosen, deselect single colour preset
+        if (sender == cboColor && cboColor.SelectedIndex > 0)
+        {
+            _updating = true;
+            cboPresetColor.SelectedIndex = -1;
+            _updating = false;
+        }
         UpdatePlot(true);
     }
 
@@ -2726,6 +2987,110 @@ public partial class MainWindow : Window
     private void RectColor_Click(object sender, MouseButtonEventArgs e)
     {
         cboPresetColor.SelectedIndex = (cboPresetColor.SelectedIndex + 1) % PresetColors.Length;
+    }
+
+    private void BtnLabelFont_Click(object sender, RoutedEventArgs e)
+    {
+        // Save originals for cancel
+        string origFamily = _labelFontFamily;
+        float origSize = _labelFontSize;
+        ScottPlot.Color origColor = _labelFontColor;
+
+        var dlg = new Window
+        {
+            Title = "Label Font Properties",
+            Width = 300, Height = 240,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Owner = this,
+            ResizeMode = ResizeMode.NoResize
+        };
+
+        var stack = new StackPanel { Margin = new Thickness(12) };
+
+        // Font family
+        stack.Children.Add(new TextBlock { Text = "Font family", FontSize = 11, Foreground = System.Windows.Media.Brushes.Gray });
+        var cboFont = new ComboBox { FontSize = 12, Margin = new Thickness(0, 0, 0, 8) };
+        foreach (var ff in System.Windows.Media.Fonts.SystemFontFamilies.OrderBy(f => f.Source))
+            cboFont.Items.Add(ff.Source);
+        cboFont.SelectedItem = _labelFontFamily;
+        if (cboFont.SelectedItem == null) cboFont.SelectedIndex = 0;
+        cboFont.SelectionChanged += (s, ev) =>
+        {
+            _labelFontFamily = cboFont.SelectedItem?.ToString() ?? "Segoe UI";
+            UpdatePlot(true);
+        };
+        stack.Children.Add(cboFont);
+
+        // Font size
+        stack.Children.Add(new TextBlock { Text = "Font size", FontSize = 11, Foreground = System.Windows.Media.Brushes.Gray });
+        var spSize = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
+        var sliderFontSize = new Slider { Minimum = 6, Maximum = 30, Value = _labelFontSize, Width = 180, TickFrequency = 1, IsSnapToTickEnabled = true };
+        var txtFontSize = new TextBlock { VerticalAlignment = System.Windows.VerticalAlignment.Center, Margin = new Thickness(6, 0, 0, 0) };
+        txtFontSize.SetBinding(TextBlock.TextProperty, new System.Windows.Data.Binding("Value") { Source = sliderFontSize, StringFormat = "{0:0}" });
+        sliderFontSize.ValueChanged += (s, ev) =>
+        {
+            _labelFontSize = (float)sliderFontSize.Value;
+            UpdatePlot(true);
+        };
+        spSize.Children.Add(sliderFontSize);
+        spSize.Children.Add(txtFontSize);
+        stack.Children.Add(spSize);
+
+        // Font colour
+        stack.Children.Add(new TextBlock { Text = "Font colour", FontSize = 11, Foreground = System.Windows.Media.Brushes.Gray });
+        var colorPanel = new WrapPanel { Margin = new Thickness(0, 0, 0, 12) };
+        var colorOptions = new (string Name, string Hex)[]
+        {
+            ("Black", "#000000"), ("Dark Grey", "#404040"), ("Grey", "#808080"),
+            ("Red", "#D62728"), ("Blue", "#1F77B4"), ("Green", "#2CA02C"),
+            ("Orange", "#FF7F0E"), ("Purple", "#9467BD"), ("Brown", "#8C564B"),
+            ("Pink", "#E377C2"), ("Cyan", "#17BECF"), ("White", "#FFFFFF"),
+        };
+        System.Windows.Shapes.Rectangle? selectedSwatch = null;
+        string currentHex = $"#{_labelFontColor.Red:X2}{_labelFontColor.Green:X2}{_labelFontColor.Blue:X2}";
+        foreach (var (name, hex) in colorOptions)
+        {
+            var swatch = new System.Windows.Shapes.Rectangle
+            {
+                Width = 22, Height = 22, Margin = new Thickness(2),
+                Fill = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(hex)),
+                Stroke = hex.Equals(currentHex, StringComparison.OrdinalIgnoreCase)
+                    ? System.Windows.Media.Brushes.Blue : System.Windows.Media.Brushes.LightGray,
+                StrokeThickness = hex.Equals(currentHex, StringComparison.OrdinalIgnoreCase) ? 2.5 : 1,
+                RadiusX = 3, RadiusY = 3,
+                Cursor = Cursors.Hand,
+                Tag = hex,
+                ToolTip = name
+            };
+            if (hex.Equals(currentHex, StringComparison.OrdinalIgnoreCase))
+                selectedSwatch = swatch;
+            swatch.MouseLeftButtonUp += (s, ev) =>
+            {
+                if (selectedSwatch != null)
+                {
+                    selectedSwatch.Stroke = System.Windows.Media.Brushes.LightGray;
+                    selectedSwatch.StrokeThickness = 1;
+                }
+                var r = (System.Windows.Shapes.Rectangle)s!;
+                r.Stroke = System.Windows.Media.Brushes.Blue;
+                r.StrokeThickness = 2.5;
+                selectedSwatch = r;
+                _labelFontColor = ParseHexColor((string)r.Tag);
+                UpdatePlot(true);
+            };
+            colorPanel.Children.Add(swatch);
+        }
+        stack.Children.Add(colorPanel);
+
+        // Close button
+        var btnPanel = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal, HorizontalAlignment = System.Windows.HorizontalAlignment.Right };
+        var btnClose = new Button { Content = "Close", Padding = new Thickness(16, 4, 16, 4), IsDefault = true };
+        btnClose.Click += (s, ev) => dlg.Close();
+        btnPanel.Children.Add(btnClose);
+        stack.Children.Add(btnPanel);
+
+        dlg.Content = stack;
+        dlg.ShowDialog();
     }
 
     private void AxisRange_Changed(object sender, RoutedEventArgs e)
