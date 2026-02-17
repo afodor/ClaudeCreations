@@ -29,8 +29,10 @@
                           x:Name="menuCopyRCode" IsEnabled="False"/>
             </MenuItem>
             <MenuItem Header="_Journal">
-                <MenuItem Header="_Publish / Append view..." Click="MenuJournalPublish_Click"
-                          x:Name="menuJournalPublish" IsEnabled="False"/>
+                <MenuItem Header="_Publish view (new journal)..." Click="MenuJournalPublishNew_Click"
+                          x:Name="menuJournalPublishNew" IsEnabled="False"/>
+                <MenuItem Header="_Append view to journal..." Click="MenuJournalAppend_Click"
+                          x:Name="menuJournalAppend" IsEnabled="False"/>
                 <MenuItem Header="_Edit journal..." Click="MenuJournalEdit_Click"
                           x:Name="menuJournalEdit"/>
                 <Separator/>
@@ -120,10 +122,10 @@
                 <StackPanel x:Name="panelControls" IsEnabled="False">
 
                     <TextBlock Text="Axes" FontWeight="Bold" FontSize="13" Margin="0,0,0,4"/>
-                    <TextBlock Text="X axis" FontSize="11" Foreground="Gray"/>
-                    <ComboBox x:Name="cboX" SelectionChanged="Axis_Changed" Margin="0,0,0,6"/>
                     <TextBlock Text="Y axis" FontSize="11" Foreground="Gray"/>
                     <ComboBox x:Name="cboY" SelectionChanged="Axis_Changed" Margin="0,0,0,6"/>
+                    <TextBlock Text="X axis" FontSize="11" Foreground="Gray"/>
+                    <ComboBox x:Name="cboX" SelectionChanged="Axis_Changed" Margin="0,0,0,6"/>
 
                     <Separator Margin="0,4"/>
 

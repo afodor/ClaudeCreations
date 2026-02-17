@@ -299,7 +299,8 @@ public partial class MainWindow : Window
             btnClose.IsEnabled = true;
             menuClose.IsEnabled = true;
             menuCopyRCode.IsEnabled = true;
-            menuJournalPublish.IsEnabled = true;
+            menuJournalPublishNew.IsEnabled = true;
+            menuJournalAppend.IsEnabled = true;
             AddToRecentFiles(path);
             _selectedRows.Clear();
             _gridHighlightedRows.Clear();
@@ -361,7 +362,8 @@ public partial class MainWindow : Window
         btnClose.IsEnabled = false;
         menuClose.IsEnabled = false;
         menuCopyRCode.IsEnabled = false;
-        menuJournalPublish.IsEnabled = false;
+        menuJournalPublishNew.IsEnabled = false;
+        menuJournalAppend.IsEnabled = false;
         txtFileName.Text = "Drag & drop a delimited text file, or click Open";
         legendPanel.Children.Clear();
         dgSelected.ItemsSource = null;
@@ -2881,6 +2883,16 @@ public partial class MainWindow : Window
             }
         }
 
+        // --- Point labels ---
+        string? labelCol = cboLabelCol.SelectedItem?.ToString();
+        bool useLabelCol = labelCol != null && labelCol != "(none)" && _data!.Columns.Contains(labelCol);
+        if (useLabelCol)
+        {
+            string labelHex = $"#{_labelFontColor.Red:X2}{_labelFontColor.Green:X2}{_labelFontColor.Blue:X2}";
+            double labelSizePt = _labelFontSize / 2.83; // px to pt approximation
+            sb.AppendLine($"  geom_text(aes(label = `{labelCol}`), size = {labelSizePt.ToString("F1", CultureInfo.InvariantCulture)}, colour = \"{labelHex}\", hjust = 0, nudge_x = 0.02, check_overlap = TRUE) +");
+        }
+
         // --- Axis labels ---
         sb.AppendLine($"  labs(x = \"{REscape(xCol)}\", y = \"{REscape(yCol)}\") +");
 
@@ -3947,24 +3959,44 @@ public partial class MainWindow : Window
     //  Session Journal
     // ====================================================================
 
-    private void MenuJournalPublish_Click(object sender, RoutedEventArgs e)
+    private void MenuJournalPublishNew_Click(object sender, RoutedEventArgs e)
     {
         if (_data == null || _columns == null) return;
-
-        // If no journal path yet, prompt user
-        if (_journalPath == null)
+        var dlg = new SaveFileDialog
         {
-            var dlg = new SaveFileDialog
+            Title = "Create new journal",
+            Filter = "HTML files|*.html",
+            FileName = $"journal_{DateTime.Now:yyyyMMdd}.html",
+            InitialDirectory = _filePath != null ? System.IO.Path.GetDirectoryName(_filePath) : ""
+        };
+        if (dlg.ShowDialog() != true) return;
+        _journalPath = dlg.FileName;
+        // Delete existing so it gets created fresh
+        if (File.Exists(_journalPath))
+            File.Delete(_journalPath);
+        PublishToJournal();
+    }
+
+    private void MenuJournalAppend_Click(object sender, RoutedEventArgs e)
+    {
+        if (_data == null || _columns == null) return;
+        if (_journalPath == null || !File.Exists(_journalPath))
+        {
+            var dlg = new OpenFileDialog
             {
-                Title = "Create new or select existing journal to append",
+                Title = "Select journal to append to",
                 Filter = "HTML files|*.html",
-                FileName = $"journal_{DateTime.Now:yyyyMMdd}.html",
-                InitialDirectory = _filePath != null ? System.IO.Path.GetDirectoryName(_filePath) : "",
-                OverwritePrompt = false  // we append to existing files, not overwrite
+                InitialDirectory = _filePath != null ? System.IO.Path.GetDirectoryName(_filePath) : ""
             };
             if (dlg.ShowDialog() != true) return;
             _journalPath = dlg.FileName;
         }
+        PublishToJournal();
+    }
+
+    private void PublishToJournal()
+    {
+        if (_data == null || _columns == null || _journalPath == null) return;
 
         // Show annotation dialog
         var dialog = new Window
