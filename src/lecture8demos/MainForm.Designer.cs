@@ -48,6 +48,11 @@ partial class MainForm
         };
         canvas.Paint += Canvas_Paint;
         canvas.Resize += (s, e) => canvas.Invalidate();
+        canvas.MouseWheel += Canvas_MouseWheel_Zoom;
+        canvas.MouseDown += Canvas_MouseDown_Zoom;
+        canvas.MouseMove += Canvas_MouseMove_Zoom;
+        canvas.MouseUp += Canvas_MouseUp_Zoom;
+        canvas.MouseEnter += (s, e) => canvas.Focus();
 
         statusBar = new StatusStrip();
         statusLabel = new ToolStripStatusLabel("Ready");
@@ -79,6 +84,49 @@ partial class MainForm
         chkBinomialApprox.CheckedChanged += (s, e) => canvas.Invalidate();
         panelHyper.Controls.Add(chkBinomialApprox); yH += 30;
 
+        panelHyper.Controls.Add(MakeLabel("X Range:", 6, yH));
+        yH += 20;
+
+        nudXRangeMin = new NumericUpDown
+        {
+            Location = new Point(6, yH),
+            Width = 70,
+            Minimum = 0,
+            Maximum = 10000,
+            Value = 0
+        };
+        nudXRangeMin.ValueChanged += NudXRange_ValueChanged;
+        panelHyper.Controls.Add(nudXRangeMin);
+
+        panelHyper.Controls.Add(new Label
+        {
+            Text = "to",
+            Location = new Point(80, yH + 3),
+            AutoSize = true
+        });
+
+        nudXRangeMax = new NumericUpDown
+        {
+            Location = new Point(98, yH),
+            Width = 70,
+            Minimum = 0,
+            Maximum = 10000,
+            Value = 10
+        };
+        nudXRangeMax.ValueChanged += NudXRange_ValueChanged;
+        panelHyper.Controls.Add(nudXRangeMax);
+        yH += 28;
+
+        btnResetZoom = new Button
+        {
+            Text = "Reset Zoom",
+            Location = new Point(6, yH),
+            Width = 162
+        };
+        btnResetZoom.Click += (s, e) => ResetHyperZoom();
+        panelHyper.Controls.Add(btnResetZoom);
+        yH += 30;
+
         lblHyperInfo = new Label
         {
             Location = new Point(6, yH),
@@ -87,9 +135,9 @@ partial class MainForm
         };
         panelHyper.Controls.Add(lblHyperInfo);
 
-        nudHyperN.ValueChanged += (s, e) => { ClampHyperParams(); canvas.Invalidate(); };
+        nudHyperN.ValueChanged += (s, e) => { ClampHyperParams(); ResetHyperZoom(); };
         nudHyperK.ValueChanged += (s, e) => { ClampHyperParams(); canvas.Invalidate(); };
-        nudHyperDraw.ValueChanged += (s, e) => { ClampHyperParams(); canvas.Invalidate(); };
+        nudHyperDraw.ValueChanged += (s, e) => { ClampHyperParams(); ResetHyperZoom(); };
 
         // ── Tool 2: Fisher's Exact Test ─────────────────────────
         panelFisher = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
@@ -344,6 +392,8 @@ partial class MainForm
     private Panel panelHyper;
     private NumericUpDown nudHyperN, nudHyperK, nudHyperDraw;
     private CheckBox chkBinomialApprox;
+    private NumericUpDown nudXRangeMin, nudXRangeMax;
+    private Button btnResetZoom;
     private Label lblHyperInfo;
 
     // Tool 2: Fisher

@@ -26,6 +26,15 @@ partial class MainForm : Form
 
     private readonly Random rng = new();
 
+    // Hypergeometric x-axis zoom state
+    private double? hyperZoomXMin;
+    private double? hyperZoomXMax;
+    private bool hyperPanning;
+    private Point hyperPanStart;
+    private double hyperPanXMinAtStart;
+    private double hyperPanXMaxAtStart;
+    private bool updatingZoomControls;
+
     public MainForm()
     {
         InitializeComponent();
@@ -56,6 +65,142 @@ partial class MainForm : Form
 
         if (mode == ToolMode.Poisson)
             UpdatePoissonLabels();
+
+        canvas.Invalidate();
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  HYPERGEOMETRIC X-AXIS ZOOM
+    // ════════════════════════════════════════════════════════════
+
+    private void Canvas_MouseWheel_Zoom(object? sender, MouseEventArgs e)
+    {
+        if (currentTool != ToolMode.HyperGeometric) return;
+
+        int n = (int)nudHyperDraw.Value;
+        double fullXMin = -0.5, fullXMax = n + 0.5;
+
+        double curXMin = hyperZoomXMin ?? fullXMin;
+        double curXMax = hyperZoomXMax ?? fullXMax;
+
+        if (plotArea.Width <= 0) return;
+        double mouseX = curXMin + (e.X - plotArea.Left) / plotArea.Width * (curXMax - curXMin);
+
+        double factor = e.Delta > 0 ? 0.8 : 1.25;
+        double newXMin = mouseX - (mouseX - curXMin) * factor;
+        double newXMax = mouseX + (curXMax - mouseX) * factor;
+
+        newXMin = Math.Max(newXMin, fullXMin);
+        newXMax = Math.Min(newXMax, fullXMax);
+
+        if (newXMax - newXMin >= fullXMax - fullXMin)
+        {
+            hyperZoomXMin = null;
+            hyperZoomXMax = null;
+        }
+        else if (newXMax - newXMin >= 1.5)
+        {
+            hyperZoomXMin = newXMin;
+            hyperZoomXMax = newXMax;
+        }
+
+        SyncZoomControls();
+        canvas.Invalidate();
+    }
+
+    private void Canvas_MouseDown_Zoom(object? sender, MouseEventArgs e)
+    {
+        if (currentTool != ToolMode.HyperGeometric) return;
+        if (e.Button == MouseButtons.Right && hyperZoomXMin.HasValue)
+        {
+            hyperPanning = true;
+            hyperPanStart = e.Location;
+            hyperPanXMinAtStart = hyperZoomXMin.Value;
+            hyperPanXMaxAtStart = hyperZoomXMax!.Value;
+        }
+    }
+
+    private void Canvas_MouseMove_Zoom(object? sender, MouseEventArgs e)
+    {
+        if (!hyperPanning || plotArea.Width <= 0) return;
+
+        double range = hyperPanXMaxAtStart - hyperPanXMinAtStart;
+        double dx = (e.X - hyperPanStart.X) / (double)plotArea.Width * range;
+
+        int n = (int)nudHyperDraw.Value;
+        double fullXMin = -0.5, fullXMax = n + 0.5;
+
+        double newXMin = hyperPanXMinAtStart - dx;
+        double newXMax = hyperPanXMaxAtStart - dx;
+
+        if (newXMin < fullXMin) { newXMax += fullXMin - newXMin; newXMin = fullXMin; }
+        if (newXMax > fullXMax) { newXMin -= newXMax - fullXMax; newXMax = fullXMax; }
+
+        hyperZoomXMin = Math.Max(newXMin, fullXMin);
+        hyperZoomXMax = Math.Min(newXMax, fullXMax);
+        SyncZoomControls();
+        canvas.Invalidate();
+    }
+
+    private void Canvas_MouseUp_Zoom(object? sender, MouseEventArgs e)
+    {
+        hyperPanning = false;
+    }
+
+    private void ResetHyperZoom()
+    {
+        hyperZoomXMin = null;
+        hyperZoomXMax = null;
+        SyncZoomControls();
+        canvas.Invalidate();
+    }
+
+    private void SyncZoomControls()
+    {
+        updatingZoomControls = true;
+        try
+        {
+            int n = (int)nudHyperDraw.Value;
+            nudXRangeMin.Maximum = n;
+            nudXRangeMax.Maximum = n;
+
+            if (hyperZoomXMin.HasValue && hyperZoomXMax.HasValue)
+            {
+                nudXRangeMin.Value = Math.Clamp((int)Math.Ceiling(hyperZoomXMin.Value), 0, n);
+                nudXRangeMax.Value = Math.Clamp((int)Math.Floor(hyperZoomXMax.Value), 0, n);
+            }
+            else
+            {
+                nudXRangeMin.Value = 0;
+                nudXRangeMax.Value = n;
+            }
+        }
+        finally
+        {
+            updatingZoomControls = false;
+        }
+    }
+
+    private void NudXRange_ValueChanged(object? sender, EventArgs e)
+    {
+        if (updatingZoomControls) return;
+
+        int n = (int)nudHyperDraw.Value;
+        int minK = Math.Clamp((int)nudXRangeMin.Value, 0, n);
+        int maxK = Math.Clamp((int)nudXRangeMax.Value, 0, n);
+
+        if (maxK - minK < 2) return;
+
+        if (minK == 0 && maxK >= n)
+        {
+            hyperZoomXMin = null;
+            hyperZoomXMax = null;
+        }
+        else
+        {
+            hyperZoomXMin = minK - 0.5;
+            hyperZoomXMax = maxK + 0.5;
+        }
 
         canvas.Invalidate();
     }
@@ -209,16 +354,40 @@ partial class MainForm : Form
             if (m > maxP) maxP = m;
         }
 
-        // Setup coordinates
-        xMin = -0.5; xMax = n + 0.5;
+        // Setup coordinates (apply zoom if active)
+        double fullXMin = -0.5, fullXMax = n + 0.5;
+        if (hyperZoomXMin.HasValue && hyperZoomXMax.HasValue)
+        {
+            xMin = Math.Max(hyperZoomXMin.Value, fullXMin);
+            xMax = Math.Min(hyperZoomXMax.Value, fullXMax);
+            // Rescale y-axis to visible bars only
+            maxP = 0;
+            for (int k = 0; k <= n; k++)
+            {
+                if (k >= xMin - 0.5 && k <= xMax + 0.5)
+                {
+                    double m = Math.Max(hyperPmf[k], showBinom ? binomPmf[k] : 0);
+                    if (m > maxP) maxP = m;
+                }
+            }
+        }
+        else
+        {
+            xMin = fullXMin;
+            xMax = fullXMax;
+        }
         yMin = 0; yMax = maxP * 1.15;
         if (yMax <= 0) yMax = 1;
 
         DrawAxes(g, "k (successes)", "P(X = k)");
         DrawTitle(g, $"Hypergeometric(N={N}, K={K}, n={n}) vs Binomial(n={n}, p={p:F3})");
 
-        float barW = Math.Max(plotArea.Width / (n + 1) * 0.35f, 2);
+        float barW = Math.Max(plotArea.Width / (float)(xMax - xMin) * 0.35f, 2);
         float baseY = DataToCanvasY(0);
+
+        // Clip bars to plot area when zoomed
+        var clipState = g.Save();
+        g.SetClip(plotArea);
 
         for (int k = 0; k <= n; k++)
         {
@@ -244,6 +413,8 @@ partial class MainForm : Form
                 g.DrawRectangle(pen, left, top, barW, baseY - top);
             }
         }
+
+        g.Restore(clipState);
 
         // Legend
         DrawLegend(g, showBinom);
