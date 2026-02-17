@@ -1757,12 +1757,26 @@ public partial class MainWindow : Window
     // ====================================================================
     //  Data area boundary detection for axis zoom
     // ====================================================================
+    /// <summary>Convert a WPF device-independent position to a ScottPlot pixel (accounts for DPI scaling).</summary>
+    private ScottPlot.Pixel WpfToPlotPixel(System.Windows.Point pos)
+    {
+        float s = wpfPlot.DisplayScale;
+        return new ScottPlot.Pixel((float)pos.X * s, (float)pos.Y * s);
+    }
+
+    /// <summary>Convert a ScottPlot pixel back to WPF device-independent coordinates.</summary>
+    private System.Windows.Point PlotPixelToWpf(ScottPlot.Pixel px)
+    {
+        float s = wpfPlot.DisplayScale;
+        return new System.Windows.Point(px.X / s, px.Y / s);
+    }
+
     private (double left, double right, double top, double bottom) GetDataAreaPixelBounds()
     {
-        // Use GetPixel on current axis limits to find data area edges
+        // Returns bounds in WPF DIP space so comparisons with GetPosition() work
         var limits = wpfPlot.Plot.Axes.GetLimits();
-        var bottomLeft = wpfPlot.Plot.GetPixel(new Coordinates(limits.Left, limits.Bottom));
-        var topRight = wpfPlot.Plot.GetPixel(new Coordinates(limits.Right, limits.Top));
+        var bottomLeft = PlotPixelToWpf(wpfPlot.Plot.GetPixel(new Coordinates(limits.Left, limits.Bottom)));
+        var topRight = PlotPixelToWpf(wpfPlot.Plot.GetPixel(new Coordinates(limits.Right, limits.Top)));
         return (bottomLeft.X, topRight.X, topRight.Y, bottomLeft.Y);
     }
 
@@ -1772,18 +1786,21 @@ public partial class MainWindow : Window
     private int FindNearestPoint(System.Windows.Point pos)
     {
         if (_plotX == null || _plotY == null) return -1;
+        var plotPx = WpfToPlotPixel(pos);
         int nearest = -1;
         double bestDist = double.MaxValue;
         for (int i = 0; i < _plotX.Length; i++)
         {
+            if (!IsRowVisible(i)) continue;
             if (double.IsNaN(_plotX[i]) || double.IsNaN(_plotY[i])) continue;
             var px = wpfPlot.Plot.GetPixel(new Coordinates(_plotX[i], _plotY[i]));
-            double dx = px.X - pos.X;
-            double dy = px.Y - pos.Y;
+            double dx = px.X - plotPx.X;
+            double dy = px.Y - plotPx.Y;
             double dist = dx * dx + dy * dy;
             if (dist < bestDist) { bestDist = dist; nearest = i; }
         }
-        return nearest >= 0 && bestDist < 400 ? nearest : -1; // within ~20px
+        float scaledThreshold = 20 * wpfPlot.DisplayScale;
+        return nearest >= 0 && bestDist < scaledThreshold * scaledThreshold ? nearest : -1;
     }
 
     private void HandleHover(MouseEventArgs e)
@@ -1791,7 +1808,8 @@ public partial class MainWindow : Window
         if (_plotX == null || _plotY == null || _data == null) { HideTooltip(); return; }
 
         var pos = e.GetPosition(wpfPlot);
-        var coord = wpfPlot.Plot.GetCoordinates(new ScottPlot.Pixel((float)pos.X, (float)pos.Y));
+        var plotPx = WpfToPlotPixel(pos);
+        var coord = wpfPlot.Plot.GetCoordinates(plotPx);
 
         // Find nearest point (in pixel space for accuracy)
         int nearest = -1;
@@ -1800,13 +1818,14 @@ public partial class MainWindow : Window
         {
             if (double.IsNaN(_plotX[i]) || double.IsNaN(_plotY[i])) continue;
             var px = wpfPlot.Plot.GetPixel(new Coordinates(_plotX[i], _plotY[i]));
-            double dx = px.X - pos.X;
-            double dy = px.Y - pos.Y;
+            double dx = px.X - plotPx.X;
+            double dy = px.Y - plotPx.Y;
             double dist = dx * dx + dy * dy;
             if (dist < bestDist) { bestDist = dist; nearest = i; }
         }
 
-        if (nearest >= 0 && bestDist < 400) // within ~20px
+        float hoverThreshold = 20 * wpfPlot.DisplayScale;
+        if (nearest >= 0 && bestDist < hoverThreshold * hoverThreshold)
         {
             if (_hoveredRow != nearest)
             {
@@ -1886,7 +1905,7 @@ public partial class MainWindow : Window
     private void Plot_MouseDown(object sender, MouseButtonEventArgs e)
     {
         _dragStart = e.GetPosition(wpfPlot);
-        _selectStart = new ScottPlot.Pixel((float)_dragStart.X, (float)_dragStart.Y);
+        _selectStart = WpfToPlotPixel(_dragStart);
         _isSelecting = true;
         wpfPlot.CaptureMouse();
 
@@ -1982,7 +2001,7 @@ public partial class MainWindow : Window
         selectionRect.Visibility = Visibility.Collapsed;
 
         var pos = e.GetPosition(wpfPlot);
-        var selectEnd = new ScottPlot.Pixel((float)pos.X, (float)pos.Y);
+        var selectEnd = WpfToPlotPixel(pos);
 
         // Too small = click, not drag
         bool tooSmall = Math.Abs(selectEnd.X - _selectStart.X) < 3 &&
@@ -2022,6 +2041,9 @@ public partial class MainWindow : Window
             else
             {
                 _selectedRows.Clear();
+                int nearest = FindNearestPoint(pos);
+                if (nearest >= 0)
+                    _selectedRows.Add(nearest);
             }
         }
         else
@@ -2137,8 +2159,8 @@ public partial class MainWindow : Window
     {
         var pos = e.GetPosition(wpfPlot);
         // Convert pixel delta to data delta
-        var startCoord = wpfPlot.Plot.GetCoordinates(new ScottPlot.Pixel((float)_panStart.X, (float)_panStart.Y));
-        var currentCoord = wpfPlot.Plot.GetCoordinates(new ScottPlot.Pixel((float)pos.X, (float)pos.Y));
+        var startCoord = wpfPlot.Plot.GetCoordinates(WpfToPlotPixel(_panStart));
+        var currentCoord = wpfPlot.Plot.GetCoordinates(WpfToPlotPixel(pos));
         double dx = startCoord.X - currentCoord.X;
         double dy = startCoord.Y - currentCoord.Y;
 
@@ -2163,8 +2185,8 @@ public partial class MainWindow : Window
     private void HandleAxisPan(MouseEventArgs e)
     {
         var pos = e.GetPosition(wpfPlot);
-        var startCoord = wpfPlot.Plot.GetCoordinates(new ScottPlot.Pixel((float)_panStart.X, (float)_panStart.Y));
-        var currentCoord = wpfPlot.Plot.GetCoordinates(new ScottPlot.Pixel((float)pos.X, (float)pos.Y));
+        var startCoord = wpfPlot.Plot.GetCoordinates(WpfToPlotPixel(_panStart));
+        var currentCoord = wpfPlot.Plot.GetCoordinates(WpfToPlotPixel(pos));
 
         var limits = _panStartLimits;
 
@@ -2203,7 +2225,7 @@ public partial class MainWindow : Window
         if (_plotX == null || _plotY == null) return;
 
         var pos = e.GetPosition(wpfPlot);
-        var coord = wpfPlot.Plot.GetCoordinates(new ScottPlot.Pixel((float)pos.X, (float)pos.Y));
+        var coord = wpfPlot.Plot.GetCoordinates(WpfToPlotPixel(pos));
         var limits = wpfPlot.Plot.Axes.GetLimits();
 
         double factor = e.Delta > 0 ? 0.85 : 1.0 / 0.85; // zoom in or out
