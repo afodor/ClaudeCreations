@@ -27,6 +27,9 @@
                           x:Name="menuCopySelected" IsEnabled="False"/>
                 <MenuItem Header="Copy _R Code" Click="MenuCopyRCode_Click"
                           x:Name="menuCopyRCode" IsEnabled="False"/>
+                <Separator/>
+                <MenuItem Header="_Save Image..." Click="MenuSaveImage_Click"
+                          x:Name="menuSaveImage" IsEnabled="False"/>
             </MenuItem>
             <MenuItem Header="_Journal">
                 <MenuItem Header="_Publish view (new journal)..." Click="MenuJournalPublishNew_Click"

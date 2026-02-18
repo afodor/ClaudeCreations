@@ -17,6 +17,8 @@ namespace ScatterPlotExplorer;
 
 public partial class MainWindow : Window
 {
+    private const string AppVersion = "0.101";
+
     // ---------- data state ----------
     private DataTable? _data;
     private string[]? _columns;
@@ -100,8 +102,21 @@ public partial class MainWindow : Window
     // saved preset index for restoring after "Colour selected" override
     private int _savedPresetIndex = 0;
 
+    // user-drawn lines
+    private enum UserLineType { Horizontal, Vertical, TwoPoint }
+    private class UserLine
+    {
+        public UserLineType Type;
+        public double X1, Y1, X2, Y2;
+        public ScottPlot.Color Color = ScottPlot.Colors.Black;
+        public float Width = 2;
+        public ScottPlot.LinePattern Pattern = ScottPlot.LinePattern.Solid;
+    }
+    private List<UserLine> _userLines = new();
+
     // journal
     private string? _journalPath;
+    private static string? _lastJournalDir;
 
     // multi-window support
     private static readonly List<MainWindow> _allWindows = new();
@@ -159,6 +174,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        Title = $"Scatter Plot Explorer v{AppVersion}";
         try
         {
             string icoPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "app.ico");
@@ -173,6 +189,38 @@ public partial class MainWindow : Window
         KeyDown += Window_KeyDown;
         _allWindows.Add(this);
         Closed += (s, e) => _allWindows.Remove(this);
+
+        // Handle command-line journal launch
+        if (App.JournalArg != null)
+        {
+            Loaded += (s, e) => LoadJournalEntry(App.JournalArg, App.EntryArg ?? 0);
+        }
+    }
+
+    private void LoadJournalEntry(string journalPath, int entryIndex)
+    {
+        try
+        {
+            if (!File.Exists(journalPath))
+            {
+                MessageBox.Show($"Journal file not found:\n{journalPath}", "Journal Not Found", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            _journalPath = journalPath;
+            var entries = ParseJournalEntriesFull(File.ReadAllText(journalPath, Encoding.UTF8));
+            var withJson = entries.Where(e => !string.IsNullOrEmpty(e.Json)).ToList();
+            if (entryIndex < 0 || entryIndex >= withJson.Count)
+            {
+                MessageBox.Show($"Entry index {entryIndex} out of range (journal has {withJson.Count} entries with view state).",
+                    "Invalid Entry", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            ApplyViewState(withJson[entryIndex].Json!);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Error loading journal entry:\n{ex.Message}", "Journal Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
     }
 
     private void Window_KeyDown(object sender, KeyEventArgs e)
@@ -299,6 +347,7 @@ public partial class MainWindow : Window
             btnClose.IsEnabled = true;
             menuClose.IsEnabled = true;
             menuCopyRCode.IsEnabled = true;
+            menuSaveImage.IsEnabled = true;
             menuJournalPublishNew.IsEnabled = true;
             menuJournalAppend.IsEnabled = true;
             AddToRecentFiles(path);
@@ -344,6 +393,7 @@ public partial class MainWindow : Window
         _showIdentityLine = false;
         _categoryColorOverrides.Clear();
         _pointColorOverrides.Clear();
+        _userLines.Clear();
         statsPanel.Children.Clear();
         statsPanel.Children.Add(new TextBlock { Text = "(no model fitted)", FontSize = 11, Foreground = Brushes.Gray });
         AddIdentityLineControls();
@@ -362,6 +412,7 @@ public partial class MainWindow : Window
         btnClose.IsEnabled = false;
         menuClose.IsEnabled = false;
         menuCopyRCode.IsEnabled = false;
+        menuSaveImage.IsEnabled = false;
         menuJournalPublishNew.IsEnabled = false;
         menuJournalAppend.IsEnabled = false;
         txtFileName.Text = "Drag & drop a delimited text file, or click Open";
@@ -987,6 +1038,38 @@ public partial class MainWindow : Window
                 vLine.LineWidth = 1;
                 vLine.Color = axisColor;
                 vLine.LinePattern = ScottPlot.LinePattern.DenselyDashed;
+            }
+        }
+
+        // --- Draw user lines ---
+        foreach (var ul in _userLines)
+        {
+            double lx1, ly1, lx2, ly2;
+            if (ul.Type == UserLineType.Horizontal)
+            {
+                ly1 = ly2 = logY ? Math.Log10(ul.Y1) : ul.Y1;
+                lx1 = _dataXMin; lx2 = _dataXMax;
+            }
+            else if (ul.Type == UserLineType.Vertical)
+            {
+                lx1 = lx2 = logX ? Math.Log10(ul.X1) : ul.X1;
+                ly1 = _dataYMin; ly2 = _dataYMax;
+            }
+            else // TwoPoint
+            {
+                lx1 = logX ? Math.Log10(ul.X1) : ul.X1;
+                ly1 = logY ? Math.Log10(ul.Y1) : ul.Y1;
+                lx2 = logX ? Math.Log10(ul.X2) : ul.X2;
+                ly2 = logY ? Math.Log10(ul.Y2) : ul.Y2;
+            }
+            if (!double.IsNaN(lx1) && !double.IsNaN(ly1) && !double.IsNaN(lx2) && !double.IsNaN(ly2)
+                && !double.IsInfinity(lx1) && !double.IsInfinity(ly1) && !double.IsInfinity(lx2) && !double.IsInfinity(ly2))
+            {
+                var uLine = plot.Add.Scatter(new[] { lx1, lx2 }, new[] { ly1, ly2 });
+                uLine.MarkerSize = 0;
+                uLine.LineWidth = ul.Width;
+                uLine.Color = ul.Color;
+                uLine.LinePattern = ul.Pattern;
             }
         }
 
@@ -2140,6 +2223,21 @@ public partial class MainWindow : Window
                     UpdatePlot(true);
                 };
                 cm.Items.Add(cartesian);
+                cm.Items.Add(new Separator());
+                var pixel = WpfToPlotPixel(pos);
+                var clickCoords = wpfPlot.Plot.GetCoordinates(pixel);
+                var drawLineItem = new MenuItem { Header = "Draw a line..." };
+                drawLineItem.Click += (s, args) => ShowDrawLineDialog(clickCoords);
+                cm.Items.Add(drawLineItem);
+                if (_userLines.Count > 0)
+                {
+                    var manageLines = new MenuItem { Header = "Manage lines..." };
+                    manageLines.Click += (s, args) => ShowManageLinesDialog();
+                    cm.Items.Add(manageLines);
+                    var clearLines = new MenuItem { Header = "Clear all lines" };
+                    clearLines.Click += (s, args) => { _userLines.Clear(); UpdatePlot(true); };
+                    cm.Items.Add(clearLines);
+                }
                 if (_selectedRows.Count > 0)
                 {
                     cm.Items.Add(new Separator());
@@ -2668,6 +2766,323 @@ public partial class MainWindow : Window
     }
 
     // ====================================================================
+    //  Draw-a-Line dialogs
+    // ====================================================================
+    private static readonly (string Name, ScottPlot.LinePattern Pattern)[] LinePatterns =
+    [
+        ("Solid", ScottPlot.LinePattern.Solid),
+        ("Dashed", ScottPlot.LinePattern.Dashed),
+        ("Dotted", ScottPlot.LinePattern.Dotted),
+        ("DenselyDashed", ScottPlot.LinePattern.DenselyDashed),
+    ];
+
+    private void ShowDrawLineDialog(Coordinates clickCoords)
+    {
+        bool logX = chkLogX.IsChecked == true;
+        bool logY = chkLogY.IsChecked == true;
+        // Convert click position back to data space
+        double dataX = logX ? Math.Pow(10, clickCoords.X) : clickCoords.X;
+        double dataY = logY ? Math.Pow(10, clickCoords.Y) : clickCoords.Y;
+
+        var dlg = new Window
+        {
+            Title = "Draw a Line",
+            Width = 380, Height = 340,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Owner = this,
+            ResizeMode = ResizeMode.NoResize
+        };
+        var stack = new StackPanel { Margin = new Thickness(15) };
+
+        // Type radio buttons
+        var rbHorizontal = new RadioButton { Content = "Horizontal (at Y value)", IsChecked = true, Margin = new Thickness(0, 0, 0, 4) };
+        var rbVertical = new RadioButton { Content = "Vertical (at X value)", Margin = new Thickness(0, 0, 0, 4) };
+        var rbTwoPoint = new RadioButton { Content = "Two points", Margin = new Thickness(0, 0, 0, 8) };
+        stack.Children.Add(new TextBlock { Text = "Line type:", FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 4) });
+        stack.Children.Add(rbHorizontal);
+        stack.Children.Add(rbVertical);
+        stack.Children.Add(rbTwoPoint);
+
+        // Coordinate inputs
+        var coordPanel = new Grid { Margin = new Thickness(0, 4, 0, 8) };
+        coordPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) });
+        coordPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        coordPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) });
+        coordPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        for (int r = 0; r < 2; r++) coordPanel.RowDefinitions.Add(new RowDefinition());
+
+        var lblX1 = new TextBlock { Text = "Y:", VerticalAlignment = System.Windows.VerticalAlignment.Center, Margin = new Thickness(0, 0, 4, 0) };
+        var txtVal1 = new TextBox { Text = dataY.ToString("G6", CultureInfo.InvariantCulture), Margin = new Thickness(0, 0, 8, 2) };
+        Grid.SetRow(lblX1, 0); Grid.SetColumn(lblX1, 0);
+        Grid.SetRow(txtVal1, 0); Grid.SetColumn(txtVal1, 1); Grid.SetColumnSpan(txtVal1, 3);
+
+        var lblX1b = new TextBlock { Text = "X1:", VerticalAlignment = System.Windows.VerticalAlignment.Center, Margin = new Thickness(0, 0, 4, 0) };
+        var txtX1 = new TextBox { Margin = new Thickness(0, 0, 8, 2) };
+        var lblY1b = new TextBlock { Text = "Y1:", VerticalAlignment = System.Windows.VerticalAlignment.Center, Margin = new Thickness(0, 0, 4, 0) };
+        var txtY1 = new TextBox { Margin = new Thickness(0, 0, 0, 2) };
+        Grid.SetRow(lblX1b, 0); Grid.SetColumn(lblX1b, 0);
+        Grid.SetRow(txtX1, 0); Grid.SetColumn(txtX1, 1);
+        Grid.SetRow(lblY1b, 0); Grid.SetColumn(lblY1b, 2);
+        Grid.SetRow(txtY1, 0); Grid.SetColumn(txtY1, 3);
+
+        var lblX2b = new TextBlock { Text = "X2:", VerticalAlignment = System.Windows.VerticalAlignment.Center, Margin = new Thickness(0, 0, 4, 0) };
+        var txtX2 = new TextBox { Margin = new Thickness(0, 0, 8, 2) };
+        var lblY2b = new TextBlock { Text = "Y2:", VerticalAlignment = System.Windows.VerticalAlignment.Center, Margin = new Thickness(0, 0, 4, 0) };
+        var txtY2 = new TextBox { Margin = new Thickness(0, 0, 0, 2) };
+        Grid.SetRow(lblX2b, 1); Grid.SetColumn(lblX2b, 0);
+        Grid.SetRow(txtX2, 1); Grid.SetColumn(txtX2, 1);
+        Grid.SetRow(lblY2b, 1); Grid.SetColumn(lblY2b, 2);
+        Grid.SetRow(txtY2, 1); Grid.SetColumn(txtY2, 3);
+
+        coordPanel.Children.Add(lblX1); coordPanel.Children.Add(txtVal1);
+        stack.Children.Add(coordPanel);
+
+        // Style controls
+        var styleGrid = new Grid { Margin = new Thickness(0, 0, 0, 8) };
+        styleGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) });
+        styleGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        styleGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) });
+        styleGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        for (int r = 0; r < 2; r++) styleGrid.RowDefinitions.Add(new RowDefinition());
+
+        var lblThick = new TextBlock { Text = "Thickness:", VerticalAlignment = System.Windows.VerticalAlignment.Center, Margin = new Thickness(0, 0, 4, 2) };
+        var cboThick = new ComboBox { Margin = new Thickness(0, 0, 8, 2) };
+        foreach (var t in new[] { "1", "1.5", "2", "3", "4", "5" }) cboThick.Items.Add(t);
+        cboThick.SelectedIndex = 2; // default 2
+        Grid.SetRow(lblThick, 0); Grid.SetColumn(lblThick, 0);
+        Grid.SetRow(cboThick, 0); Grid.SetColumn(cboThick, 1);
+
+        var lblColor = new TextBlock { Text = "Colour:", VerticalAlignment = System.Windows.VerticalAlignment.Center, Margin = new Thickness(0, 0, 4, 2) };
+        var cboColor = new ComboBox { Margin = new Thickness(0, 0, 0, 2) };
+        foreach (var (name, _) in PresetColors) cboColor.Items.Add(name);
+        cboColor.SelectedIndex = 10; // Black
+        Grid.SetRow(lblColor, 0); Grid.SetColumn(lblColor, 2);
+        Grid.SetRow(cboColor, 0); Grid.SetColumn(cboColor, 3);
+
+        var lblStyle = new TextBlock { Text = "Style:", VerticalAlignment = System.Windows.VerticalAlignment.Center, Margin = new Thickness(0, 0, 4, 2) };
+        var cboStyle = new ComboBox { Margin = new Thickness(0, 0, 8, 2) };
+        foreach (var (name, _) in LinePatterns) cboStyle.Items.Add(name);
+        cboStyle.SelectedIndex = 0; // Solid
+        Grid.SetRow(lblStyle, 1); Grid.SetColumn(lblStyle, 0);
+        Grid.SetRow(cboStyle, 1); Grid.SetColumn(cboStyle, 1);
+
+        styleGrid.Children.Add(lblThick); styleGrid.Children.Add(cboThick);
+        styleGrid.Children.Add(lblColor); styleGrid.Children.Add(cboColor);
+        styleGrid.Children.Add(lblStyle); styleGrid.Children.Add(cboStyle);
+        stack.Children.Add(styleGrid);
+
+        // Update coordinate panel based on radio selection
+        void UpdateCoordPanel()
+        {
+            coordPanel.Children.Clear();
+            coordPanel.RowDefinitions.Clear();
+            if (rbHorizontal.IsChecked == true)
+            {
+                coordPanel.RowDefinitions.Add(new RowDefinition());
+                lblX1.Text = "Y:";
+                txtVal1.Text = dataY.ToString("G6", CultureInfo.InvariantCulture);
+                coordPanel.Children.Add(lblX1); coordPanel.Children.Add(txtVal1);
+                Grid.SetColumnSpan(txtVal1, 3);
+            }
+            else if (rbVertical.IsChecked == true)
+            {
+                coordPanel.RowDefinitions.Add(new RowDefinition());
+                lblX1.Text = "X:";
+                txtVal1.Text = dataX.ToString("G6", CultureInfo.InvariantCulture);
+                coordPanel.Children.Add(lblX1); coordPanel.Children.Add(txtVal1);
+                Grid.SetColumnSpan(txtVal1, 3);
+            }
+            else
+            {
+                coordPanel.RowDefinitions.Add(new RowDefinition());
+                coordPanel.RowDefinitions.Add(new RowDefinition());
+                txtX1.Text = dataX.ToString("G6", CultureInfo.InvariantCulture);
+                txtY1.Text = dataY.ToString("G6", CultureInfo.InvariantCulture);
+                txtX2.Text = ""; txtY2.Text = "";
+                Grid.SetColumnSpan(txtVal1, 1); // reset
+                coordPanel.Children.Add(lblX1b); coordPanel.Children.Add(txtX1);
+                coordPanel.Children.Add(lblY1b); coordPanel.Children.Add(txtY1);
+                coordPanel.Children.Add(lblX2b); coordPanel.Children.Add(txtX2);
+                coordPanel.Children.Add(lblY2b); coordPanel.Children.Add(txtY2);
+            }
+        }
+        rbHorizontal.Checked += (s, ev) => UpdateCoordPanel();
+        rbVertical.Checked += (s, ev) => UpdateCoordPanel();
+        rbTwoPoint.Checked += (s, ev) => UpdateCoordPanel();
+
+        // Buttons
+        var btnPanel = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal, HorizontalAlignment = System.Windows.HorizontalAlignment.Right, Margin = new Thickness(0, 8, 0, 0) };
+        var btnOk = new Button { Content = "Draw", Padding = new Thickness(16, 4, 16, 4), IsDefault = true };
+        var btnCancel = new Button { Content = "Cancel", Padding = new Thickness(16, 4, 16, 4), Margin = new Thickness(8, 0, 0, 0), IsCancel = true };
+        btnOk.Click += (s, ev) => dlg.DialogResult = true;
+        btnPanel.Children.Add(btnOk);
+        btnPanel.Children.Add(btnCancel);
+        stack.Children.Add(btnPanel);
+        dlg.Content = stack;
+
+        if (dlg.ShowDialog() != true) return;
+
+        // Parse result
+        var line = new UserLine();
+        int colorIdx = Math.Max(0, cboColor.SelectedIndex);
+        line.Color = ParseHexColor(PresetColors[colorIdx].Hex);
+        if (float.TryParse(cboThick.SelectedItem?.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out float thick))
+            line.Width = thick;
+        int styleIdx = Math.Max(0, cboStyle.SelectedIndex);
+        line.Pattern = LinePatterns[styleIdx].Pattern;
+
+        if (rbHorizontal.IsChecked == true)
+        {
+            if (!double.TryParse(txtVal1.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double yVal)) return;
+            line.Type = UserLineType.Horizontal;
+            line.Y1 = yVal;
+        }
+        else if (rbVertical.IsChecked == true)
+        {
+            if (!double.TryParse(txtVal1.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double xVal)) return;
+            line.Type = UserLineType.Vertical;
+            line.X1 = xVal;
+        }
+        else
+        {
+            if (!double.TryParse(txtX1.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double x1) ||
+                !double.TryParse(txtY1.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double y1) ||
+                !double.TryParse(txtX2.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double x2) ||
+                !double.TryParse(txtY2.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double y2))
+                return;
+            line.Type = UserLineType.TwoPoint;
+            line.X1 = x1; line.Y1 = y1; line.X2 = x2; line.Y2 = y2;
+        }
+
+        _userLines.Add(line);
+        UpdatePlot(true);
+    }
+
+    private void ShowManageLinesDialog()
+    {
+        if (_userLines.Count == 0) return;
+
+        var dlg = new Window
+        {
+            Title = "Manage Lines",
+            Width = 500, Height = 400,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Owner = this,
+            ResizeMode = ResizeMode.CanResize
+        };
+        var root = new DockPanel { Margin = new Thickness(10) };
+
+        var btnPanel = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal, HorizontalAlignment = System.Windows.HorizontalAlignment.Right, Margin = new Thickness(0, 8, 0, 0) };
+        DockPanel.SetDock(btnPanel, Dock.Bottom);
+        var btnClose = new Button { Content = "Close", Padding = new Thickness(16, 4, 16, 4) };
+        btnClose.Click += (s, ev) => dlg.Close();
+        btnPanel.Children.Add(btnClose);
+        root.Children.Add(btnPanel);
+
+        var scroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        var linesPanel = new StackPanel();
+
+        void RebuildList()
+        {
+            linesPanel.Children.Clear();
+            for (int i = 0; i < _userLines.Count; i++)
+            {
+                var ul = _userLines[i];
+                int capturedIdx = i;
+                var row = new DockPanel { Margin = new Thickness(0, 2, 0, 2) };
+
+                string desc;
+                if (ul.Type == UserLineType.Horizontal)
+                    desc = $"Horizontal at Y = {ul.Y1:G6}";
+                else if (ul.Type == UserLineType.Vertical)
+                    desc = $"Vertical at X = {ul.X1:G6}";
+                else
+                    desc = $"({ul.X1:G6}, {ul.Y1:G6}) \u2192 ({ul.X2:G6}, {ul.Y2:G6})";
+
+                string hex = $"#{ul.Color.Red:X2}{ul.Color.Green:X2}{ul.Color.Blue:X2}";
+                var colorRect = new System.Windows.Shapes.Rectangle
+                {
+                    Width = 16, Height = 16,
+                    Fill = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(hex)),
+                    Margin = new Thickness(0, 0, 6, 0),
+                    VerticalAlignment = System.Windows.VerticalAlignment.Center
+                };
+                DockPanel.SetDock(colorRect, Dock.Left);
+                row.Children.Add(colorRect);
+
+                var btnDel = new Button { Content = "Delete", Padding = new Thickness(6, 2, 6, 2), Margin = new Thickness(4, 0, 0, 0) };
+                DockPanel.SetDock(btnDel, Dock.Right);
+                btnDel.Click += (s, ev) =>
+                {
+                    _userLines.RemoveAt(capturedIdx);
+                    RebuildList();
+                    UpdatePlot(true);
+                };
+                row.Children.Add(btnDel);
+
+                row.Children.Add(new TextBlock { Text = desc, VerticalAlignment = System.Windows.VerticalAlignment.Center });
+                linesPanel.Children.Add(row);
+            }
+            if (_userLines.Count == 0)
+                linesPanel.Children.Add(new TextBlock { Text = "No lines.", Foreground = Brushes.Gray });
+        }
+
+        RebuildList();
+        scroll.Content = linesPanel;
+        root.Children.Add(scroll);
+        dlg.Content = root;
+        dlg.Show();
+    }
+
+    // ====================================================================
+    //  Save Image
+    // ====================================================================
+    private void MenuSaveImage_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new Microsoft.Win32.SaveFileDialog
+        {
+            Title = "Save Plot Image",
+            Filter = "PNG Image (*.png)|*.png|JPEG Image (*.jpg;*.jpeg)|*.jpg;*.jpeg|BMP Image (*.bmp)|*.bmp|SVG Vector (*.svg)|*.svg",
+            FilterIndex = 1,
+            FileName = System.IO.Path.GetFileNameWithoutExtension(_filePath ?? "plot")
+        };
+        if (dlg.ShowDialog() != true) return;
+
+        string ext = System.IO.Path.GetExtension(dlg.FileName).ToLowerInvariant();
+        int w = (int)wpfPlot.ActualWidth;
+        int h = (int)wpfPlot.ActualHeight;
+        if (w < 1) w = 1000;
+        if (h < 1) h = 700;
+
+        try
+        {
+            switch (ext)
+            {
+                case ".png":
+                    wpfPlot.Plot.SavePng(dlg.FileName, w, h);
+                    break;
+                case ".jpg":
+                case ".jpeg":
+                    wpfPlot.Plot.SaveJpeg(dlg.FileName, w, h, quality: 95);
+                    break;
+                case ".bmp":
+                    wpfPlot.Plot.SaveBmp(dlg.FileName, w, h);
+                    break;
+                case ".svg":
+                    wpfPlot.Plot.SaveSvg(dlg.FileName, w, h);
+                    break;
+                default:
+                    wpfPlot.Plot.SavePng(dlg.FileName, w, h);
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Error saving image: {ex.Message}", "Save Image",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
     //  Copy R Code
     // ====================================================================
     private void MenuCopyRCode_Click(object sender, RoutedEventArgs e)
@@ -2863,6 +3278,23 @@ public partial class MainWindow : Window
             string idCol = $"\"#{_identityLineColor.Red:X2}{_identityLineColor.Green:X2}{_identityLineColor.Blue:X2}\"";
             string idLty = _identityLineDashed ? "\"dashed\"" : "\"solid\"";
             sb.AppendLine($"  geom_abline(intercept = 0, slope = 1, colour = {idCol}, linewidth = {(_identityLineWidth / 2.0).ToString("F1", CultureInfo.InvariantCulture)}, linetype = {idLty}) +");
+        }
+
+        // --- User lines ---
+        foreach (var ul in _userLines)
+        {
+            string ulCol = $"\"#{ul.Color.Red:X2}{ul.Color.Green:X2}{ul.Color.Blue:X2}\"";
+            string ulLw = (ul.Width / 2.0).ToString("F1", CultureInfo.InvariantCulture);
+            string ulLty = ul.Pattern.Equals(ScottPlot.LinePattern.Dashed) ? "\"dashed\""
+                         : ul.Pattern.Equals(ScottPlot.LinePattern.Dotted) ? "\"dotted\""
+                         : ul.Pattern.Equals(ScottPlot.LinePattern.DenselyDashed) ? "\"dashed\""
+                         : "\"solid\"";
+            if (ul.Type == UserLineType.Horizontal)
+                sb.AppendLine($"  geom_hline(yintercept = {ul.Y1.ToString("G6", CultureInfo.InvariantCulture)}, colour = {ulCol}, linewidth = {ulLw}, linetype = {ulLty}) +");
+            else if (ul.Type == UserLineType.Vertical)
+                sb.AppendLine($"  geom_vline(xintercept = {ul.X1.ToString("G6", CultureInfo.InvariantCulture)}, colour = {ulCol}, linewidth = {ulLw}, linetype = {ulLty}) +");
+            else
+                sb.AppendLine($"  geom_segment(aes(x = {ul.X1.ToString("G6", CultureInfo.InvariantCulture)}, y = {ul.Y1.ToString("G6", CultureInfo.InvariantCulture)}, xend = {ul.X2.ToString("G6", CultureInfo.InvariantCulture)}, yend = {ul.Y2.ToString("G6", CultureInfo.InvariantCulture)}), colour = {ulCol}, linewidth = {ulLw}, linetype = {ulLty}, inherit.aes = FALSE) +");
         }
 
         // --- Regression ---
@@ -3989,10 +4421,11 @@ public partial class MainWindow : Window
             Title = "Create new journal",
             Filter = "HTML files|*.html",
             FileName = $"journal_{DateTime.Now:yyyyMMdd}.html",
-            InitialDirectory = _filePath != null ? System.IO.Path.GetDirectoryName(_filePath) : ""
+            InitialDirectory = GetJournalInitialDir()
         };
         if (dlg.ShowDialog() != true) return;
         _journalPath = dlg.FileName;
+        TrackJournalDir(dlg.FileName);
         // Delete existing so it gets created fresh
         if (File.Exists(_journalPath))
             File.Delete(_journalPath);
@@ -4008,10 +4441,11 @@ public partial class MainWindow : Window
             {
                 Title = "Select journal to append to",
                 Filter = "HTML files|*.html",
-                InitialDirectory = _filePath != null ? System.IO.Path.GetDirectoryName(_filePath) : ""
+                InitialDirectory = GetJournalInitialDir()
             };
             if (dlg.ShowDialog() != true) return;
             _journalPath = dlg.FileName;
+            TrackJournalDir(dlg.FileName);
         }
         PublishToJournal();
     }
@@ -4030,6 +4464,7 @@ public partial class MainWindow : Window
             ResizeMode = ResizeMode.NoResize
         };
         var stack = new StackPanel { Margin = new Thickness(15) };
+        stack.Children.Add(new TextBlock { Text = _journalPath, FontSize = 11, Foreground = Brushes.Gray, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(0, 0, 0, 6), ToolTip = _journalPath });
         stack.Children.Add(new TextBlock { Text = "Add notes about this view:", FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 6) });
         var txtAnnotation = new TextBox
         {
@@ -4081,6 +4516,7 @@ public partial class MainWindow : Window
                     entrySb.AppendLine($"    <p>{System.Net.WebUtility.HtmlEncode(line.TrimEnd('\r'))}</p>");
                 entrySb.AppendLine($"  </div>");
             }
+            entrySb.AppendLine($"  <button class=\"open-btn\" onclick=\"openEntry(this)\">Open in ScatterPlot</button>");
             entrySb.AppendLine($"  <details><summary>View state (JSON)</summary>");
             entrySb.AppendLine($"  <script class=\"view-state\" type=\"application/json\">");
             entrySb.AppendLine(stateJson);
@@ -4111,12 +4547,15 @@ public partial class MainWindow : Window
                 fileSb.AppendLine("details { margin-top: 10px; }");
                 fileSb.AppendLine("details summary { cursor: pointer; color: #1F77B4; font-size: 0.9em; }");
                 fileSb.AppendLine(".json-display { background: #f5f5f5; padding: 10px; border-radius: 4px; font-size: 0.8em; overflow-x: auto; max-height: 300px; overflow-y: auto; }");
-                fileSb.AppendLine("@media print { .entry { break-inside: avoid; } details { display: none; } }");
+                fileSb.AppendLine("@media print { .entry { break-inside: avoid; } details { display: none; } .open-btn { display: none; } }");
+                fileSb.AppendLine(".open-btn { display: inline-block; margin: 8px 0; padding: 6px 16px; background: #1F77B4; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 0.9em; }");
+                fileSb.AppendLine(".open-btn:hover { background: #155a8a; }");
                 fileSb.AppendLine("</style>");
                 fileSb.AppendLine("</head>");
                 fileSb.AppendLine("<body>");
                 fileSb.AppendLine("<h1>Scatter Plot Explorer — Session Journal</h1>");
                 fileSb.Append(entrySb);
+                fileSb.AppendLine(JournalScript());
                 fileSb.AppendLine("</body>");
                 fileSb.AppendLine("</html>");
                 File.WriteAllText(_journalPath, fileSb.ToString(), Encoding.UTF8);
@@ -4229,6 +4668,23 @@ public partial class MainWindow : Window
         state["labelFontSize"] = _labelFontSize;
         state["labelFontColor"] = $"#{_labelFontColor.Red:X2}{_labelFontColor.Green:X2}{_labelFontColor.Blue:X2}";
 
+        // User lines
+        if (_userLines.Count > 0)
+        {
+            state["userLines"] = _userLines.Select(ul => new Dictionary<string, object?>
+            {
+                ["type"] = ul.Type.ToString(),
+                ["x1"] = ul.X1, ["y1"] = ul.Y1,
+                ["x2"] = ul.X2, ["y2"] = ul.Y2,
+                ["color"] = $"#{ul.Color.Red:X2}{ul.Color.Green:X2}{ul.Color.Blue:X2}",
+                ["width"] = ul.Width,
+                ["pattern"] = ul.Pattern.Equals(ScottPlot.LinePattern.Dashed) ? "Dashed"
+                            : ul.Pattern.Equals(ScottPlot.LinePattern.Dotted) ? "Dotted"
+                            : ul.Pattern.Equals(ScottPlot.LinePattern.DenselyDashed) ? "DenselyDashed"
+                            : "Solid"
+            }).ToList();
+        }
+
         var options = new JsonSerializerOptions { WriteIndented = true };
         return JsonSerializer.Serialize(state, options);
     }
@@ -4258,6 +4714,68 @@ public partial class MainWindow : Window
         return string.Join(" · ", parts);
     }
 
+    private string GetJournalInitialDir()
+    {
+        if (_lastJournalDir != null && Directory.Exists(_lastJournalDir))
+            return _lastJournalDir;
+        if (_journalPath != null)
+            return System.IO.Path.GetDirectoryName(_journalPath) ?? "";
+        return _filePath != null ? System.IO.Path.GetDirectoryName(_filePath) ?? "" : "";
+    }
+
+    private static void TrackJournalDir(string journalFilePath)
+    {
+        _lastJournalDir = System.IO.Path.GetDirectoryName(journalFilePath);
+    }
+
+    private static string JournalScript()
+    {
+        string exePath = (Environment.ProcessPath ?? System.Reflection.Assembly.GetExecutingAssembly().Location).Replace("\\", "\\\\");
+        return $@"<script>
+(function() {{
+  // Pre-seed exe path from the app that generated this journal
+  if (!localStorage.getItem('scatterplot_exe')) {{
+    localStorage.setItem('scatterplot_exe', '{exePath}');
+  }}
+}})();
+function openEntry(btn) {{
+  var entry = btn.closest('.entry');
+  if (!entry) return;
+  var entries = document.querySelectorAll('.entry');
+  var idx = Array.prototype.indexOf.call(entries, entry);
+  var journalPath = location.pathname;
+  // On Windows, location.pathname may start with /C:/... — normalize
+  if (journalPath.match(/^\/[A-Za-z]:\//)) journalPath = journalPath.substring(1);
+  journalPath = decodeURIComponent(journalPath).replace(/\//g, '\\');
+  var url = 'scatterplot://open?journal=' + encodeURIComponent(journalPath) + '&entry=' + idx;
+  // Try protocol launch via hidden iframe
+  var iframe = document.createElement('iframe');
+  iframe.style.display = 'none';
+  iframe.src = url;
+  document.body.appendChild(iframe);
+  setTimeout(function() {{
+    document.body.removeChild(iframe);
+  }}, 2000);
+  // Fallback: show copyable command
+  var exePath = localStorage.getItem('scatterplot_exe') || '';
+  if (!exePath) {{
+    exePath = prompt('If the app did not open, enter the path to ScatterPlotExplorer.exe\\n(leave blank to skip):','');
+    if (exePath) localStorage.setItem('scatterplot_exe', exePath);
+  }}
+  if (exePath) {{
+    var cmd = '""' + exePath + '"" --journal ""' + journalPath + '"" --entry ' + idx;
+    btn.title = cmd;
+  }}
+}}
+</script>";
+    }
+
+    private static string JournalCss()
+    {
+        return ".open-btn { display: inline-block; margin: 8px 0; padding: 6px 16px; background: #1F77B4; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 0.9em; }\n"
+             + ".open-btn:hover { background: #155a8a; }\n";
+    }
+
     private void MenuJournalOpen_Click(object sender, RoutedEventArgs e)
     {
         string? pathToOpen = _journalPath;
@@ -4268,11 +4786,12 @@ public partial class MainWindow : Window
             {
                 Title = "Open journal file",
                 Filter = "HTML files|*.html|All files|*.*",
-                InitialDirectory = _filePath != null ? System.IO.Path.GetDirectoryName(_filePath) : ""
+                InitialDirectory = GetJournalInitialDir()
             };
             if (dlg.ShowDialog() != true) return;
             pathToOpen = dlg.FileName;
             _journalPath = pathToOpen;
+            TrackJournalDir(pathToOpen);
         }
 
         try
@@ -4296,11 +4815,12 @@ public partial class MainWindow : Window
             {
                 Title = "Open journal file",
                 Filter = "HTML files|*.html|All files|*.*",
-                InitialDirectory = _filePath != null ? System.IO.Path.GetDirectoryName(_filePath) : ""
+                InitialDirectory = GetJournalInitialDir()
             };
             if (dlg.ShowDialog() != true) return;
             journalFile = dlg.FileName;
             _journalPath = journalFile;
+            TrackJournalDir(journalFile);
         }
 
         // Parse entries from journal HTML
@@ -4478,9 +4998,23 @@ public partial class MainWindow : Window
                 LoadFile(filePath);
             else
             {
-                MessageBox.Show($"Data file not found:\n{filePath}\n\nOpen the file first, then try loading the view again.",
-                    "File Not Found", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
+                var result = MessageBox.Show($"Data file not found:\n{filePath}\n\nWould you like to locate it?",
+                    "File Not Found", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                if (result == MessageBoxResult.Yes)
+                {
+                    var dlg = new OpenFileDialog
+                    {
+                        Title = "Locate data file",
+                        Filter = "All files|*.*",
+                        FileName = System.IO.Path.GetFileName(filePath)
+                    };
+                    if (dlg.ShowDialog() == true)
+                        LoadFile(dlg.FileName);
+                    else
+                        return;
+                }
+                else
+                    return;
             }
         }
 
@@ -4597,6 +5131,36 @@ public partial class MainWindow : Window
             if (root.TryGetProperty("regLineDashed", out var rld)) _regLineDashed = rld.GetBoolean();
         }
 
+        // User lines
+        _userLines.Clear();
+        if (root.TryGetProperty("userLines", out var ulArr) && ulArr.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var ulElem in ulArr.EnumerateArray())
+            {
+                var ul = new UserLine();
+                if (ulElem.TryGetProperty("type", out var ulType) && ulType.ValueKind == JsonValueKind.String)
+                    Enum.TryParse(ulType.GetString(), out ul.Type);
+                if (ulElem.TryGetProperty("x1", out var ux1)) ul.X1 = ux1.GetDouble();
+                if (ulElem.TryGetProperty("y1", out var uy1)) ul.Y1 = uy1.GetDouble();
+                if (ulElem.TryGetProperty("x2", out var ux2)) ul.X2 = ux2.GetDouble();
+                if (ulElem.TryGetProperty("y2", out var uy2)) ul.Y2 = uy2.GetDouble();
+                if (ulElem.TryGetProperty("color", out var ucol) && ucol.ValueKind == JsonValueKind.String)
+                    ul.Color = ParseHexColor(ucol.GetString()!);
+                if (ulElem.TryGetProperty("width", out var uw)) ul.Width = (float)uw.GetDouble();
+                if (ulElem.TryGetProperty("pattern", out var upat) && upat.ValueKind == JsonValueKind.String)
+                {
+                    ul.Pattern = upat.GetString() switch
+                    {
+                        "Dashed" => ScottPlot.LinePattern.Dashed,
+                        "Dotted" => ScottPlot.LinePattern.Dotted,
+                        "DenselyDashed" => ScottPlot.LinePattern.DenselyDashed,
+                        _ => ScottPlot.LinePattern.Solid
+                    };
+                }
+                _userLines.Add(ul);
+            }
+        }
+
         _updating = false;
 
         // Rebuild filters UI to reflect loaded state, then recompute
@@ -4656,11 +5220,12 @@ public partial class MainWindow : Window
             {
                 Title = "Open journal file to edit",
                 Filter = "HTML files|*.html|All files|*.*",
-                InitialDirectory = _filePath != null ? System.IO.Path.GetDirectoryName(_filePath) : ""
+                InitialDirectory = GetJournalInitialDir()
             };
             if (dlg.ShowDialog() != true) return;
             journalFile = dlg.FileName;
             _journalPath = journalFile;
+            TrackJournalDir(journalFile);
         }
 
         string html = File.ReadAllText(journalFile, Encoding.UTF8);
@@ -4713,8 +5278,8 @@ public partial class MainWindow : Window
             };
             var cardStack = new StackPanel();
 
-            // Header row: timestamp + summary + delete button
-            var headerRow = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
+            // Header row: timestamp + delete
+            var headerRow = new DockPanel { Margin = new Thickness(0, 0, 0, 4) };
             var btnDelete = new Button { Content = "Delete", Padding = new Thickness(8, 2, 8, 2), Foreground = Brushes.Red, FontSize = 11 };
             DockPanel.SetDock(btnDelete, Dock.Right);
             headerRow.Children.Add(btnDelete);
@@ -4726,6 +5291,14 @@ public partial class MainWindow : Window
             };
             headerRow.Children.Add(headerText);
             cardStack.Children.Add(headerRow);
+
+            // Move buttons row
+            var btnMoveUp = new Button { Content = "Move Up", Padding = new Thickness(8, 2, 8, 2), FontSize = 11 };
+            var btnMoveDown = new Button { Content = "Move Down", Padding = new Thickness(8, 2, 8, 2), FontSize = 11, Margin = new Thickness(6, 0, 0, 0) };
+            var moveRow = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 6) };
+            moveRow.Children.Add(btnMoveUp);
+            moveRow.Children.Add(btnMoveDown);
+            cardStack.Children.Add(moveRow);
 
             if (!string.IsNullOrEmpty(entry.Summary))
             {
@@ -4791,6 +5364,43 @@ public partial class MainWindow : Window
                     statusText.Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xD6, 0x27, 0x28));
                 }
             };
+
+            // Wire move up/down buttons
+            var capturedCardForMove = card;
+            btnMoveUp.Click += (s, ev) =>
+            {
+                int idx = entriesPanel.Children.IndexOf(capturedCardForMove);
+                if (idx <= 0) return;
+                // Swap in visual panel
+                entriesPanel.Children.RemoveAt(idx);
+                entriesPanel.Children.Insert(idx - 1, capturedCardForMove);
+                // Swap in entries list
+                int ei = entries.IndexOf(entryControls[idx].entry);
+                int ej = entries.IndexOf(entryControls[idx - 1].entry);
+                (entries[ei], entries[ej]) = (entries[ej], entries[ei]);
+                // Swap in entryControls
+                (entryControls[idx], entryControls[idx - 1]) = (entryControls[idx - 1], entryControls[idx]);
+                statusText.Text = "Entry moved up — click Save to apply.";
+                statusText.Foreground = Brushes.Gray;
+                capturedCardForMove.BringIntoView();
+            };
+            btnMoveDown.Click += (s, ev) =>
+            {
+                int idx = entriesPanel.Children.IndexOf(capturedCardForMove);
+                if (idx < 0 || idx >= entriesPanel.Children.Count - 1) return;
+                // Swap in visual panel
+                entriesPanel.Children.RemoveAt(idx);
+                entriesPanel.Children.Insert(idx + 1, capturedCardForMove);
+                // Swap in entries list
+                int ei = entries.IndexOf(entryControls[idx].entry);
+                int ej = entries.IndexOf(entryControls[idx + 1].entry);
+                (entries[ei], entries[ej]) = (entries[ej], entries[ei]);
+                // Swap in entryControls
+                (entryControls[idx], entryControls[idx + 1]) = (entryControls[idx + 1], entryControls[idx]);
+                statusText.Text = "Entry moved down — click Save to apply.";
+                statusText.Foreground = Brushes.Gray;
+                capturedCardForMove.BringIntoView();
+            };
         }
 
         scrollViewer.Content = entriesPanel;
@@ -4817,12 +5427,18 @@ public partial class MainWindow : Window
                 Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFF, 0xFD, 0xE7))
             };
             var cardStack = new StackPanel();
-            var headerRow = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
+            var headerRow = new DockPanel { Margin = new Thickness(0, 0, 0, 4) };
             var btnDel = new Button { Content = "Delete", Padding = new Thickness(8, 2, 8, 2), Foreground = Brushes.Red, FontSize = 11 };
             DockPanel.SetDock(btnDel, Dock.Right);
             headerRow.Children.Add(btnDel);
             headerRow.Children.Add(new TextBlock { Text = newEntry.Timestamp, FontWeight = FontWeights.SemiBold, FontSize = 13, VerticalAlignment = System.Windows.VerticalAlignment.Center });
             cardStack.Children.Add(headerRow);
+            var btnUp = new Button { Content = "Move Up", Padding = new Thickness(8, 2, 8, 2), FontSize = 11 };
+            var btnDown = new Button { Content = "Move Down", Padding = new Thickness(8, 2, 8, 2), FontSize = 11, Margin = new Thickness(6, 0, 0, 0) };
+            var noteMoveRow = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 6) };
+            noteMoveRow.Children.Add(btnUp);
+            noteMoveRow.Children.Add(btnDown);
+            cardStack.Children.Add(noteMoveRow);
             cardStack.Children.Add(new TextBlock { Text = "Annotation:", FontSize = 11, Foreground = Brushes.Gray, Margin = new Thickness(0, 0, 0, 2) });
             var txtAnn = new TextBox
             {
@@ -4842,6 +5458,34 @@ public partial class MainWindow : Window
             {
                 capturedEntry.Deleted = true;
                 capturedCard.Visibility = Visibility.Collapsed;
+            };
+            btnUp.Click += (s2, ev2) =>
+            {
+                int idx = entriesPanel.Children.IndexOf(capturedCard);
+                if (idx <= 0) return;
+                entriesPanel.Children.RemoveAt(idx);
+                entriesPanel.Children.Insert(idx - 1, capturedCard);
+                int ei = entries.IndexOf(entryControls[idx].entry);
+                int ej = entries.IndexOf(entryControls[idx - 1].entry);
+                (entries[ei], entries[ej]) = (entries[ej], entries[ei]);
+                (entryControls[idx], entryControls[idx - 1]) = (entryControls[idx - 1], entryControls[idx]);
+                statusText.Text = "Entry moved up — click Save to apply.";
+                statusText.Foreground = Brushes.Gray;
+                capturedCard.BringIntoView();
+            };
+            btnDown.Click += (s2, ev2) =>
+            {
+                int idx = entriesPanel.Children.IndexOf(capturedCard);
+                if (idx < 0 || idx >= entriesPanel.Children.Count - 1) return;
+                entriesPanel.Children.RemoveAt(idx);
+                entriesPanel.Children.Insert(idx + 1, capturedCard);
+                int ei = entries.IndexOf(entryControls[idx].entry);
+                int ej = entries.IndexOf(entryControls[idx + 1].entry);
+                (entries[ei], entries[ej]) = (entries[ej], entries[ei]);
+                (entryControls[idx], entryControls[idx + 1]) = (entryControls[idx + 1], entryControls[idx]);
+                statusText.Text = "Entry moved down — click Save to apply.";
+                statusText.Foreground = Brushes.Gray;
+                capturedCard.BringIntoView();
             };
 
             txtAnn.Focus();
@@ -4878,7 +5522,8 @@ public partial class MainWindow : Window
                 sb.AppendLine("details { margin-top: 10px; }");
                 sb.AppendLine("details summary { cursor: pointer; color: #1F77B4; font-size: 0.9em; }");
                 sb.AppendLine(".json-display { background: #f5f5f5; padding: 10px; border-radius: 4px; font-size: 0.8em; overflow-x: auto; max-height: 300px; overflow-y: auto; }");
-                sb.AppendLine("@media print { .entry { break-inside: avoid; } details { display: none; } }");
+                sb.AppendLine("@media print { .entry { break-inside: avoid; } details { display: none; } .open-btn { display: none; } }");
+                sb.AppendLine(JournalCss());
                 sb.AppendLine("</style>");
                 sb.AppendLine("</head>");
                 sb.AppendLine("<body>");
@@ -4903,6 +5548,7 @@ public partial class MainWindow : Window
                     }
                     if (!string.IsNullOrEmpty(entry.Json))
                     {
+                        sb.AppendLine("  <button class=\"open-btn\" onclick=\"openEntry(this)\">Open in ScatterPlot</button>");
                         sb.AppendLine("  <details><summary>View state (JSON)</summary>");
                         sb.AppendLine("  <script class=\"view-state\" type=\"application/json\">");
                         sb.AppendLine(entry.Json);
@@ -4913,6 +5559,7 @@ public partial class MainWindow : Window
                     sb.AppendLine("</div>");
                 }
 
+                sb.AppendLine(JournalScript());
                 sb.AppendLine("</body>");
                 sb.AppendLine("</html>");
 
