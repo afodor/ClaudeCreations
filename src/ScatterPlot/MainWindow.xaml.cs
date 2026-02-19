@@ -171,6 +171,12 @@ public partial class MainWindow : Window
         "ScatterPlotExplorer", "recent.txt");
     private List<string> _recentFiles = new();
 
+    // recent journals
+    private static readonly string RecentJournalsPath = System.IO.Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "ScatterPlotExplorer", "recent_journals.txt");
+    private List<string> _recentJournals = new();
+
     public MainWindow()
     {
         InitializeComponent();
