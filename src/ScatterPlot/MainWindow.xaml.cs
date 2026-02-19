@@ -357,6 +357,11 @@ public partial class MainWindow : Window
             _legendHighlightedRows.Clear();
             _categoryColorOverrides.Clear();
             _pointColorOverrides.Clear();
+            _userLines.Clear();
+            _regressionCoeffs = null;
+            _regressionPredictors = null;
+            _regressionResponse = null;
+            _showIdentityLine = false;
             statsPanel.Children.Clear();
             statsPanel.Children.Add(new TextBlock { Text = "(no model fitted)", FontSize = 11, Foreground = Brushes.Gray });
             AddIdentityLineControls();
