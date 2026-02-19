@@ -17,7 +17,7 @@ namespace ScatterPlotExplorer;
 
 public partial class MainWindow : Window
 {
-    private const string AppVersion = "0.101";
+    private const string AppVersion = "0.103";
 
     // ---------- data state ----------
     private DataTable? _data;
@@ -348,6 +348,7 @@ public partial class MainWindow : Window
             menuClose.IsEnabled = true;
             menuCopyRCode.IsEnabled = true;
             menuSaveImage.IsEnabled = true;
+            menuCopyImage.IsEnabled = true;
             menuJournalPublishNew.IsEnabled = true;
             menuJournalAppend.IsEnabled = true;
             AddToRecentFiles(path);
@@ -413,6 +414,7 @@ public partial class MainWindow : Window
         menuClose.IsEnabled = false;
         menuCopyRCode.IsEnabled = false;
         menuSaveImage.IsEnabled = false;
+        menuCopyImage.IsEnabled = false;
         menuJournalPublishNew.IsEnabled = false;
         menuJournalAppend.IsEnabled = false;
         txtFileName.Text = "Drag & drop a delimited text file, or click Open";
@@ -2245,6 +2247,10 @@ public partial class MainWindow : Window
                     copyItem.Click += (s2, args2) => CopySelectedToClipboard();
                     cm.Items.Add(copyItem);
                 }
+                cm.Items.Add(new Separator());
+                var copyImageItem = new MenuItem { Header = "Copy image" };
+                copyImageItem.Click += (s, args) => MenuCopyImage_Click(s, args);
+                cm.Items.Add(copyImageItem);
                 cm.PlacementTarget = wpfPlot;
                 cm.IsOpen = true;
             }
@@ -3032,6 +3038,34 @@ public partial class MainWindow : Window
         root.Children.Add(scroll);
         dlg.Content = root;
         dlg.Show();
+    }
+
+    // ====================================================================
+    //  Copy Image to Clipboard
+    // ====================================================================
+    private void MenuCopyImage_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            string tempPng = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"spe_clip_{Guid.NewGuid():N}.png");
+            int w = (int)wpfPlot.ActualWidth;
+            int h = (int)wpfPlot.ActualHeight;
+            if (w < 100) w = 800;
+            if (h < 100) h = 600;
+            wpfPlot.Plot.SavePng(tempPng, w, h);
+            var bitmap = new System.Windows.Media.Imaging.BitmapImage();
+            bitmap.BeginInit();
+            bitmap.UriSource = new Uri(tempPng);
+            bitmap.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+            bitmap.EndInit();
+            bitmap.Freeze();
+            Clipboard.SetImage(bitmap);
+            try { File.Delete(tempPng); } catch { }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Error copying image:\n{ex.Message}", "Copy Image", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
     }
 
     // ====================================================================
