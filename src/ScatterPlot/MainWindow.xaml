@@ -40,6 +40,7 @@
                           x:Name="menuJournalAppend" IsEnabled="False"/>
                 <MenuItem Header="_Edit journal..." Click="MenuJournalEdit_Click"
                           x:Name="menuJournalEdit"/>
+                <MenuItem Header="_Recent journals" x:Name="menuRecentJournals"/>
                 <Separator/>
                 <MenuItem Header="_Open in browser" Click="MenuJournalOpen_Click"
                           x:Name="menuJournalOpen"/>
@@ -64,14 +65,27 @@
                 </Grid.RowDefinitions>
 
                 <!-- File open -->
-                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,4">
-                    <Button x:Name="btnOpen" Content="Open File..." Click="BtnOpen_Click"
-                            Padding="12,4" FontSize="13"/>
-                    <Button x:Name="btnClose" Content="Close File" Click="BtnClose_Click"
-                            Padding="12,4" FontSize="13" Margin="6,0,0,0" IsEnabled="False"/>
-                    <TextBlock x:Name="txtFileName" VerticalAlignment="Center"
+                <Grid Grid.Row="0" Margin="0,0,0,4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <StackPanel Grid.Row="0" Grid.Column="0" Orientation="Horizontal">
+                        <Button x:Name="btnOpen" Content="Open File..." Click="BtnOpen_Click"
+                                Padding="12,4" FontSize="13"/>
+                        <Button x:Name="btnClose" Content="Close File" Click="BtnClose_Click"
+                                Padding="12,4" FontSize="13" Margin="6,0,0,0" IsEnabled="False"/>
+                    </StackPanel>
+                    <TextBlock x:Name="txtFileName" Grid.Row="0" Grid.Column="1" VerticalAlignment="Center"
                                Margin="10,0,0,0" Foreground="Gray" Text="Drag &amp; drop a delimited text file, or click Open"/>
-                </StackPanel>
+                    <TextBlock x:Name="txtJournalName" Grid.Row="1" Grid.Column="1"
+                               Margin="10,1,0,0" Foreground="#999999" FontSize="11"
+                               TextTrimming="CharacterEllipsis" Visibility="Collapsed"/>
+                </Grid>
 
             <!-- ScottPlot + selection overlay + hover tooltip -->
             <Grid Grid.Row="1">

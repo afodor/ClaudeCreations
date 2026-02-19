@@ -17,7 +17,7 @@ namespace ScatterPlotExplorer;
 
 public partial class MainWindow : Window
 {
-    private const string AppVersion = "0.103";
+    private const string AppVersion = "0.106";
 
     // ---------- data state ----------
     private DataTable? _data;
@@ -192,6 +192,8 @@ public partial class MainWindow : Window
         SetupSelectionInput();
         LoadRecentFiles();
         BuildRecentMenu();
+        LoadRecentJournals();
+        BuildRecentJournalsMenu();
         KeyDown += Window_KeyDown;
         _allWindows.Add(this);
         Closed += (s, e) => _allWindows.Remove(this);
@@ -213,6 +215,9 @@ public partial class MainWindow : Window
                 return;
             }
             _journalPath = journalPath;
+            TrackJournalDir(journalPath);
+            AddToRecentJournals(journalPath);
+            UpdateJournalDisplay();
             var entries = ParseJournalEntriesFull(File.ReadAllText(journalPath, Encoding.UTF8));
             var withJson = entries.Where(e => !string.IsNullOrEmpty(e.Json)).ToList();
             if (entryIndex < 0 || entryIndex >= withJson.Count)
@@ -506,6 +511,80 @@ public partial class MainWindow : Window
                 _recentFiles.Remove(path);
                 SaveRecentFiles();
                 BuildRecentMenu();
+            }
+        }
+    }
+
+    // ====================================================================
+    //  Recent journals
+    // ====================================================================
+    private void LoadRecentJournals()
+    {
+        _recentJournals.Clear();
+        try
+        {
+            if (File.Exists(RecentJournalsPath))
+            {
+                var lines = File.ReadAllLines(RecentJournalsPath);
+                _recentJournals = lines.Where(l => !string.IsNullOrWhiteSpace(l)).Take(10).ToList();
+            }
+        }
+        catch { }
+    }
+
+    private void SaveRecentJournals()
+    {
+        try
+        {
+            var dir = System.IO.Path.GetDirectoryName(RecentJournalsPath)!;
+            if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+            File.WriteAllLines(RecentJournalsPath, _recentJournals);
+        }
+        catch { }
+    }
+
+    private void AddToRecentJournals(string path)
+    {
+        _recentJournals.RemoveAll(f => string.Equals(f, path, StringComparison.OrdinalIgnoreCase));
+        _recentJournals.Insert(0, path);
+        if (_recentJournals.Count > 10) _recentJournals.RemoveRange(10, _recentJournals.Count - 10);
+        SaveRecentJournals();
+        BuildRecentJournalsMenu();
+    }
+
+    private void BuildRecentJournalsMenu()
+    {
+        menuRecentJournals.Items.Clear();
+        if (_recentJournals.Count == 0)
+        {
+            menuRecentJournals.Items.Add(new MenuItem { Header = "(none)", IsEnabled = false });
+            return;
+        }
+        foreach (var path in _recentJournals)
+        {
+            var item = new MenuItem { Header = path, Tag = path };
+            item.Click += RecentJournal_Click;
+            menuRecentJournals.Items.Add(item);
+        }
+    }
+
+    private void RecentJournal_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is MenuItem mi && mi.Tag is string path)
+        {
+            if (File.Exists(path))
+            {
+                _journalPath = path;
+                TrackJournalDir(path);
+                UpdateJournalDisplay();
+                MessageBox.Show($"Journal loaded:\n{path}\n\nUse 'Append view to journal' to add entries.", "Journal Loaded", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            else
+            {
+                MessageBox.Show($"Journal not found:\n{path}");
+                _recentJournals.Remove(path);
+                SaveRecentJournals();
+                BuildRecentJournalsMenu();
             }
         }
     }
@@ -4622,6 +4701,8 @@ public partial class MainWindow : Window
                 }
             }
 
+            AddToRecentJournals(_journalPath);
+            UpdateJournalDisplay();
             MessageBox.Show($"View published to journal.\n{_journalPath}", "Journal", MessageBoxButton.OK, MessageBoxImage.Information);
         }
         catch (Exception ex)
@@ -4773,6 +4854,20 @@ public partial class MainWindow : Window
         _lastJournalDir = System.IO.Path.GetDirectoryName(journalFilePath);
     }
 
+    private void UpdateJournalDisplay()
+    {
+        if (_journalPath != null)
+        {
+            txtJournalName.Text = $"Journal: {_journalPath}";
+            txtJournalName.ToolTip = _journalPath;
+            txtJournalName.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            txtJournalName.Visibility = Visibility.Collapsed;
+        }
+    }
+
     private static string JournalScript()
     {
         string exePath = (Environment.ProcessPath ?? System.Reflection.Assembly.GetExecutingAssembly().Location).Replace("\\", "\\\\");
@@ -4837,6 +4932,8 @@ function openEntry(btn) {{
             pathToOpen = dlg.FileName;
             _journalPath = pathToOpen;
             TrackJournalDir(pathToOpen);
+            AddToRecentJournals(pathToOpen);
+            UpdateJournalDisplay();
         }
 
         try
@@ -4866,6 +4963,8 @@ function openEntry(btn) {{
             journalFile = dlg.FileName;
             _journalPath = journalFile;
             TrackJournalDir(journalFile);
+            AddToRecentJournals(journalFile);
+            UpdateJournalDisplay();
         }
 
         // Parse entries from journal HTML
@@ -5271,6 +5370,8 @@ function openEntry(btn) {{
             journalFile = dlg.FileName;
             _journalPath = journalFile;
             TrackJournalDir(journalFile);
+            AddToRecentJournals(journalFile);
+            UpdateJournalDisplay();
         }
 
         string html = File.ReadAllText(journalFile, Encoding.UTF8);
