@@ -80,11 +80,12 @@
                         <Button x:Name="btnClose" Content="Close File" Click="BtnClose_Click"
                                 Padding="12,4" FontSize="13" Margin="6,0,0,0" IsEnabled="False"/>
                     </StackPanel>
-                    <TextBlock x:Name="txtFileName" Grid.Row="0" Grid.Column="1" VerticalAlignment="Center"
-                               Margin="10,0,0,0" Foreground="Gray" Text="Drag &amp; drop a delimited text file, or click Open"/>
-                    <TextBlock x:Name="txtJournalName" Grid.Row="1" Grid.Column="1"
-                               Margin="10,1,0,0" Foreground="#999999" FontSize="11"
-                               TextTrimming="CharacterEllipsis" Visibility="Collapsed"/>
+                    <TextBox x:Name="txtFileName" Grid.Row="0" Grid.Column="1" VerticalAlignment="Center"
+                             Margin="10,0,0,0" Foreground="Gray" Background="Transparent" BorderThickness="0"
+                             IsReadOnly="True" Text="Drag &amp; drop a delimited text file, or click Open"/>
+                    <TextBox x:Name="txtJournalName" Grid.Row="1" Grid.Column="1"
+                             Margin="10,1,0,0" Foreground="#999999" FontSize="11" Background="Transparent"
+                             BorderThickness="0" IsReadOnly="True" Visibility="Collapsed"/>
                 </Grid>
 
             <!-- ScottPlot + selection overlay + hover tooltip -->
@@ -144,7 +145,13 @@
                     <TextBlock Text="Y axis" FontSize="11" Foreground="Gray"/>
                     <ComboBox x:Name="cboY" SelectionChanged="Axis_Changed" Margin="0,0,0,6"/>
                     <TextBlock Text="X axis" FontSize="11" Foreground="Gray"/>
-                    <ComboBox x:Name="cboX" SelectionChanged="Axis_Changed" Margin="0,0,0,6"/>
+                    <ComboBox x:Name="cboX" SelectionChanged="Axis_Changed" Margin="0,0,0,4"/>
+                    <CheckBox x:Name="chkMissingAsZero" Content="Show missing as zero"
+                              FontSize="11" Margin="0,0,0,4"
+                              Checked="LogScale_Changed" Unchecked="LogScale_Changed"/>
+                    <CheckBox x:Name="chkAlphabetize" Content="Alphabetize columns"
+                              FontSize="11" Margin="0,0,0,6" IsChecked="True"
+                              Checked="AlphabetizeColumns_Changed" Unchecked="AlphabetizeColumns_Changed"/>
 
                     <Separator Margin="0,4"/>
 

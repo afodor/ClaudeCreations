@@ -17,7 +17,7 @@ namespace ScatterPlotExplorer;
 
 public partial class MainWindow : Window
 {
-    private const string AppVersion = "0.106";
+    private const string AppVersion = "1.11";
 
     // ---------- data state ----------
     private DataTable? _data;
@@ -85,6 +85,10 @@ public partial class MainWindow : Window
     private ScottPlot.Color _identityLineColor = new ScottPlot.Color(140, 140, 140);
     private float _identityLineWidth = 2;
     private bool _identityLineDashed = true;
+
+    // log10(x+1) offset tracking (for R code export)
+    private bool _logXPlus1;
+    private bool _logYPlus1;
 
     // Cartesian axes (x=0, y=0 lines)
     private bool _showCartesianAxes;
@@ -667,7 +671,10 @@ public partial class MainWindow : Window
         cboLabelCol.Items.Add("(none)");
         cboSizeCol.Items.Add("(none)");
 
-        foreach (var c in _columns!)
+        var displayCols = chkAlphabetize.IsChecked == true
+            ? _columns!.OrderBy(c => c, StringComparer.OrdinalIgnoreCase).ToArray()
+            : _columns!;
+        foreach (var c in displayCols)
         {
             cboX.Items.Add(c);
             cboY.Items.Add(c);
@@ -765,15 +772,40 @@ public partial class MainWindow : Window
                 _plotY[i] = map[_data.Rows[i][yCol].ToString()!] + (rng.NextDouble() - 0.5) * 0.3;
         }
 
+        // --- Show missing as zero ---
+        bool missingAsZero = chkMissingAsZero.IsChecked == true;
+        if (missingAsZero)
+        {
+            for (int i = 0; i < n; i++)
+            {
+                if (double.IsNaN(_plotX[i])) _plotX[i] = 0;
+                if (double.IsNaN(_plotY[i])) _plotY[i] = 0;
+            }
+        }
+
         // --- Log10 transform ---
         bool logX = chkLogX.IsChecked == true && xNumeric;
         bool logY = chkLogY.IsChecked == true && yNumeric;
+        bool logXPlus1 = logX && missingAsZero && _plotX.Any(v => !double.IsNaN(v) && v == 0);
+        bool logYPlus1 = logY && missingAsZero && _plotY.Any(v => !double.IsNaN(v) && v == 0);
+        _logXPlus1 = logXPlus1;
+        _logYPlus1 = logYPlus1;
         if (logX)
             for (int i = 0; i < n; i++)
-                _plotX[i] = _plotX[i] > 0 ? Math.Log10(_plotX[i]) : double.NaN;
+            {
+                if (logXPlus1)
+                    _plotX[i] = _plotX[i] >= 0 ? Math.Log10(_plotX[i] + 1) : double.NaN;
+                else
+                    _plotX[i] = _plotX[i] > 0 ? Math.Log10(_plotX[i]) : double.NaN;
+            }
         if (logY)
             for (int i = 0; i < n; i++)
-                _plotY[i] = _plotY[i] > 0 ? Math.Log10(_plotY[i]) : double.NaN;
+            {
+                if (logYPlus1)
+                    _plotY[i] = _plotY[i] >= 0 ? Math.Log10(_plotY[i] + 1) : double.NaN;
+                else
+                    _plotY[i] = _plotY[i] > 0 ? Math.Log10(_plotY[i]) : double.NaN;
+            }
 
         // --- Compute full data extent (for zoom clamping) ---
         {
@@ -1045,21 +1077,22 @@ public partial class MainWindow : Window
             if (_regressionPredictors[0] == curXCol && _regressionResponse == curYCol
                 && xNumeric && yNumeric)
             {
-                var rawXVals = new List<double>();
-                for (int i = 0; i < n; i++)
+                // Use full plot extent so the line spans the entire visible area
+                // Work in plot space (_dataXMin.._dataXMax) and convert back to original values
+                if (_dataXMin < _dataXMax)
                 {
-                    if (double.TryParse(_data.Rows[i][curXCol].ToString(), NumberStyles.Any,
-                        CultureInfo.InvariantCulture, out double v))
-                        rawXVals.Add(v);
-                }
-                if (rawXVals.Count >= 2)
-                {
-                    double rxMin = rawXVals.Min(), rxMax = rawXVals.Max();
                     var lx = new List<double>();
                     var ly = new List<double>();
                     for (int pi = 0; pi < 200; pi++)
                     {
-                        double rx = rxMin + (rxMax - rxMin) * pi / 199.0;
+                        double px = _dataXMin + (_dataXMax - _dataXMin) * pi / 199.0;
+                        // Convert plot-space X back to original data value
+                        double rx;
+                        if (logX)
+                            rx = logXPlus1 ? Math.Pow(10, px) - 1 : Math.Pow(10, px);
+                        else
+                            rx = px;
+                        // Apply regression model's internal transform
                         double tx = _regressionLogPredictors ? (rx > 0 ? Math.Log10(rx) : double.NaN) : rx;
                         if (double.IsNaN(tx)) continue;
                         // Evaluate polynomial: b0 + b1*tx + b2*tx² + ...
@@ -1070,9 +1103,14 @@ public partial class MainWindow : Window
                             txPow *= tx;
                             ty += _regressionCoeffs[ci] * txPow;
                         }
+                        // Convert regression output back to original Y value
                         double ry = _regressionLogResponse ? Math.Pow(10, ty) : ty;
-                        double px = logX ? (rx > 0 ? Math.Log10(rx) : double.NaN) : rx;
-                        double py = logY ? (ry > 0 ? Math.Log10(ry) : double.NaN) : ry;
+                        // Convert original Y to plot space
+                        double py;
+                        if (logY)
+                            py = logYPlus1 ? Math.Log10(ry + 1) : (ry > 0 ? Math.Log10(ry) : double.NaN);
+                        else
+                            py = ry;
                         if (!double.IsNaN(px) && !double.IsNaN(py)) { lx.Add(px); ly.Add(py); }
                     }
                     if (lx.Count >= 2)
@@ -1137,22 +1175,24 @@ public partial class MainWindow : Window
         foreach (var ul in _userLines)
         {
             double lx1, ly1, lx2, ly2;
+            double LogTransformX(double v) => logXPlus1 ? Math.Log10(v + 1) : Math.Log10(v);
+            double LogTransformY(double v) => logYPlus1 ? Math.Log10(v + 1) : Math.Log10(v);
             if (ul.Type == UserLineType.Horizontal)
             {
-                ly1 = ly2 = logY ? Math.Log10(ul.Y1) : ul.Y1;
+                ly1 = ly2 = logY ? LogTransformY(ul.Y1) : ul.Y1;
                 lx1 = _dataXMin; lx2 = _dataXMax;
             }
             else if (ul.Type == UserLineType.Vertical)
             {
-                lx1 = lx2 = logX ? Math.Log10(ul.X1) : ul.X1;
+                lx1 = lx2 = logX ? LogTransformX(ul.X1) : ul.X1;
                 ly1 = _dataYMin; ly2 = _dataYMax;
             }
             else // TwoPoint
             {
-                lx1 = logX ? Math.Log10(ul.X1) : ul.X1;
-                ly1 = logY ? Math.Log10(ul.Y1) : ul.Y1;
-                lx2 = logX ? Math.Log10(ul.X2) : ul.X2;
-                ly2 = logY ? Math.Log10(ul.Y2) : ul.Y2;
+                lx1 = logX ? LogTransformX(ul.X1) : ul.X1;
+                ly1 = logY ? LogTransformY(ul.Y1) : ul.Y1;
+                lx2 = logX ? LogTransformX(ul.X2) : ul.X2;
+                ly2 = logY ? LogTransformY(ul.Y2) : ul.Y2;
             }
             if (!double.IsNaN(lx1) && !double.IsNaN(ly1) && !double.IsNaN(lx2) && !double.IsNaN(ly2)
                 && !double.IsInfinity(lx1) && !double.IsInfinity(ly1) && !double.IsInfinity(lx2) && !double.IsInfinity(ly2))
@@ -1202,8 +1242,8 @@ public partial class MainWindow : Window
         }
 
         // --- Axis labels & ticks ---
-        plot.Axes.Bottom.Label.Text = logX ? $"{xCol} (log10)" : xCol;
-        plot.Axes.Left.Label.Text = logY ? $"{yCol} (log10)" : yCol;
+        plot.Axes.Bottom.Label.Text = logX ? $"{xCol} ({(logXPlus1 ? "log10(x+1)" : "log10")})" : xCol;
+        plot.Axes.Left.Label.Text = logY ? $"{yCol} ({(logYPlus1 ? "log10(y+1)" : "log10")})" : yCol;
 
         if (_xCategories != null)
         {
@@ -1430,7 +1470,10 @@ public partial class MainWindow : Window
 
         if (_data == null || _columns == null) return;
 
-        foreach (var col in _columns)
+        var filterCols = chkAlphabetize.IsChecked == true
+            ? _columns.OrderBy(c => c, StringComparer.OrdinalIgnoreCase).ToArray()
+            : _columns;
+        foreach (var col in filterCols)
         {
             if (IsNumericColumn(col))
                 BuildNumericFilter(col);
@@ -1898,7 +1941,7 @@ public partial class MainWindow : Window
             Convert.ToByte(hex.Substring(5, 2), 16));
     }
 
-    private static List<ScottPlot.Tick> GenerateLog10Ticks(double[]? logValues)
+    private static List<ScottPlot.Tick> GenerateLog10Ticks(double[]? logValues, bool plus1 = false)
     {
         var ticks = new List<ScottPlot.Tick>();
         if (logValues == null || logValues.Length == 0) return ticks;
@@ -1909,21 +1952,30 @@ public partial class MainWindow : Window
         int minExp = (int)Math.Floor(lo) - 1;
         int maxExp = (int)Math.Ceiling(hi) + 1;
 
+        // For log10(x+1): tick at original value V is positioned at log10(V+1), labeled "V"
+        // For log10(x): tick at original value V is positioned at log10(V), labeled "V"
+        // We generate "nice" original values: powers of 10, and 2x/5x sub-ticks
+        var niceValues = new List<double>();
+        if (plus1) niceValues.Add(0); // 0 is a meaningful value for log10(x+1)
         for (int exp = minExp; exp <= maxExp; exp++)
         {
-            double realVal = Math.Pow(10, exp);
-            ticks.Add(new ScottPlot.Tick(exp, realVal >= 1 ? realVal.ToString("G0") : realVal.ToString("G4")));
+            double p = Math.Pow(10, exp);
+            niceValues.Add(p);
+            if (maxExp - minExp <= 6)
+            {
+                niceValues.Add(2 * p);
+                niceValues.Add(5 * p);
+            }
         }
-        if (maxExp - minExp <= 6)
+
+        foreach (double origVal in niceValues)
         {
-            foreach (int sub in new[] { 2, 5 })
-                for (int exp = minExp; exp <= maxExp; exp++)
-                {
-                    double realVal = sub * Math.Pow(10, exp);
-                    double logPos = Math.Log10(realVal);
-                    if (logPos >= lo - 0.5 && logPos <= hi + 0.5)
-                        ticks.Add(new ScottPlot.Tick(logPos, realVal >= 1 ? realVal.ToString("G0") : realVal.ToString("G4")));
-                }
+            if (origVal < 0) continue;
+            double pos = plus1 ? Math.Log10(origVal + 1) : Math.Log10(origVal);
+            if (double.IsNaN(pos) || double.IsInfinity(pos)) continue;
+            if (pos < lo - 0.5 || pos > hi + 0.5) continue;
+            string label = origVal >= 1 ? origVal.ToString("G0") : origVal.ToString("G4");
+            ticks.Add(new ScottPlot.Tick(pos, label));
         }
         ticks.Sort((a, b) => a.Position.CompareTo(b.Position));
         return ticks;
@@ -3309,6 +3361,19 @@ public partial class MainWindow : Window
         if (useShapeCol && !IsNumericColumn(shapeCol!))
             sb.AppendLine($"data${RName(shapeCol!)} <- as.factor(data${RName(shapeCol!)})");
 
+        // Missing as zero
+        if (chkMissingAsZero.IsChecked == true)
+        {
+            sb.AppendLine($"data${RName(xCol)}[is.na(data${RName(xCol)})] <- 0");
+            sb.AppendLine($"data${RName(yCol)}[is.na(data${RName(yCol)})] <- 0");
+        }
+
+        // log10(x+1) data transform when zeros are present
+        if (chkLogX.IsChecked == true && _logXPlus1)
+            sb.AppendLine($"data${RName(xCol)} <- log10(data${RName(xCol)} + 1)");
+        if (chkLogY.IsChecked == true && _logYPlus1)
+            sb.AppendLine($"data${RName(yCol)} <- log10(data${RName(yCol)} + 1)");
+
         // Build aes() string
         var aes = new List<string>
         {
@@ -3391,10 +3456,21 @@ public partial class MainWindow : Window
         }
 
         // --- Log scales ---
-        bool logX = chkLogX.IsChecked == true;
-        bool logY = chkLogY.IsChecked == true;
-        if (logX) sb.AppendLine("  scale_x_log10() +");
-        if (logY) sb.AppendLine("  scale_y_log10() +");
+        // --- Log scales ---
+        bool logXR = chkLogX.IsChecked == true;
+        bool logYR = chkLogY.IsChecked == true;
+        if (logXR && _logXPlus1)
+        {
+            sb.AppendLine($"  labs(x = \"{xCol} (log10(x+1))\") +");
+        }
+        else if (logXR)
+            sb.AppendLine("  scale_x_log10() +");
+        if (logYR && _logYPlus1)
+        {
+            sb.AppendLine($"  labs(y = \"{yCol} (log10(y+1))\") +");
+        }
+        else if (logYR)
+            sb.AppendLine("  scale_y_log10() +");
 
         // --- Identity line ---
         if (_showIdentityLine)
@@ -3476,7 +3552,7 @@ public partial class MainWindow : Window
 
         // --- Axis limits (from current view) ---
         var limits = wpfPlot.Plot.Axes.GetLimits();
-        if (logX)
+        if (logXR && !_logXPlus1)
         {
             double xLo = Math.Pow(10, limits.Left);
             double xHi = Math.Pow(10, limits.Right);
@@ -3486,7 +3562,7 @@ public partial class MainWindow : Window
         {
             sb.AppendLine($"  coord_cartesian(xlim = c({limits.Left.ToString("G6", CultureInfo.InvariantCulture)}, {limits.Right.ToString("G6", CultureInfo.InvariantCulture)}),");
         }
-        if (logY)
+        if (logYR && !_logYPlus1)
         {
             double yLo = Math.Pow(10, limits.Bottom);
             double yHi = Math.Pow(10, limits.Top);
@@ -3595,6 +3671,74 @@ public partial class MainWindow : Window
         if (_updating) return;
         UpdateAxisRangeBoxes();
         UpdatePlot();
+    }
+
+    private void AlphabetizeColumns_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_updating || _columns == null) return;
+        // Save current selections
+        string? selX = cboX.SelectedItem?.ToString();
+        string? selY = cboY.SelectedItem?.ToString();
+        string? selColor = cboColor.SelectedItem?.ToString();
+        string? selShape = cboShapeCol.SelectedItem?.ToString();
+        string? selSize = cboSizeCol.SelectedItem?.ToString();
+        string? selLabel = cboLabelCol.SelectedItem?.ToString();
+
+        _updating = true;
+        var displayCols = chkAlphabetize.IsChecked == true
+            ? _columns.OrderBy(c => c, StringComparer.OrdinalIgnoreCase).ToArray()
+            : _columns;
+
+        cboX.Items.Clear();
+        cboY.Items.Clear();
+        cboColor.Items.Clear();
+        cboShapeCol.Items.Clear();
+        cboSizeCol.Items.Clear();
+        cboLabelCol.Items.Clear();
+
+        cboColor.Items.Add("(none)");
+        cboShapeCol.Items.Add("(none)");
+        cboLabelCol.Items.Add("(none)");
+        cboSizeCol.Items.Add("(none)");
+
+        foreach (var c in displayCols)
+        {
+            cboX.Items.Add(c);
+            cboY.Items.Add(c);
+            cboColor.Items.Add(c);
+            cboShapeCol.Items.Add(c);
+            cboLabelCol.Items.Add(c);
+            cboSizeCol.Items.Add(c);
+        }
+
+        // Restore selections
+        if (selX != null) cboX.SelectedItem = selX;
+        if (selY != null) cboY.SelectedItem = selY;
+        if (selColor != null) cboColor.SelectedItem = selColor;
+        if (selShape != null) cboShapeCol.SelectedItem = selShape;
+        if (selSize != null) cboSizeCol.SelectedItem = selSize;
+        if (selLabel != null) cboLabelCol.SelectedItem = selLabel;
+        _updating = false;
+
+        // Reorder filter panel without resetting filter state
+        ReorderFilterPanel();
+    }
+
+    private void ReorderFilterPanel()
+    {
+        if (filterPanel.Children.Count == 0) return;
+        var children = filterPanel.Children.Cast<UIElement>().ToList();
+        // Each child is an Expander whose Header is the column name
+        if (chkAlphabetize.IsChecked == true)
+            children = children.OrderBy(c => (c as Expander)?.Header?.ToString() ?? "", StringComparer.OrdinalIgnoreCase).ToList();
+        else if (_columns != null)
+        {
+            var order = _columns.Select((c, i) => (c, i)).ToDictionary(x => x.c, x => x.i);
+            children = children.OrderBy(c => order.GetValueOrDefault((c as Expander)?.Header?.ToString() ?? "", int.MaxValue)).ToList();
+        }
+        filterPanel.Children.Clear();
+        foreach (var child in children)
+            filterPanel.Children.Add(child);
     }
 
     private void PresetColor_Changed(object sender, SelectionChangedEventArgs e)
@@ -3860,7 +4004,7 @@ public partial class MainWindow : Window
         cboDataScope.Items.Add(new ComboBoxItem { Content = $"Selected points ({nSelected})", Tag = "selected", IsEnabled = nSelected > 0 });
         cboDataScope.Items.Add(new ComboBoxItem { Content = $"All visible points ({nVisible})", Tag = "visible" });
         cboDataScope.Items.Add(new ComboBoxItem { Content = $"All data ({nAll})", Tag = "all" });
-        cboDataScope.SelectedIndex = nSelected > 0 ? 0 : 1;
+        cboDataScope.SelectedIndex = 1; // default to "All visible points"
         mainStack.Children.Add(cboDataScope);
 
         // Buttons
@@ -4733,6 +4877,8 @@ public partial class MainWindow : Window
         state["logY"] = chkLogY.IsChecked == true;
         state["invertX"] = chkInvertX.IsChecked == true;
         state["invertY"] = chkInvertY.IsChecked == true;
+        state["missingAsZero"] = chkMissingAsZero.IsChecked == true;
+        state["alphabetize"] = chkAlphabetize.IsChecked == true;
         state["logColor"] = chkLogColor.IsChecked == true;
         state["reverseColor"] = chkReverseColor.IsChecked == true;
         state["logSize"] = chkLogSize.IsChecked == true;
@@ -5187,6 +5333,8 @@ function openEntry(btn) {{
         if (root.TryGetProperty("logY", out var ly)) chkLogY.IsChecked = ly.GetBoolean();
         if (root.TryGetProperty("invertX", out var ix)) chkInvertX.IsChecked = ix.GetBoolean();
         if (root.TryGetProperty("invertY", out var iy)) chkInvertY.IsChecked = iy.GetBoolean();
+        if (root.TryGetProperty("missingAsZero", out var maz)) chkMissingAsZero.IsChecked = maz.GetBoolean();
+        if (root.TryGetProperty("alphabetize", out var alph)) chkAlphabetize.IsChecked = alph.GetBoolean();
         if (root.TryGetProperty("logColor", out var lcol)) chkLogColor.IsChecked = lcol.GetBoolean();
         if (root.TryGetProperty("reverseColor", out var rc)) chkReverseColor.IsChecked = rc.GetBoolean();
         if (root.TryGetProperty("logSize", out var lsz)) chkLogSize.IsChecked = lsz.GetBoolean();
