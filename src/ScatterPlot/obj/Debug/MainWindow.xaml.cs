@@ -17,7 +17,7 @@ namespace ScatterPlotExplorer;
 
 public partial class MainWindow : Window
 {
-    private const string AppVersion = "1.11";
+    private const string AppVersion = "1.12";
 
     // ---------- data state ----------
     private DataTable? _data;
@@ -425,6 +425,7 @@ public partial class MainWindow : Window
         cboColor.Items.Clear();
         cboShapeCol.Items.Clear();
         cboSizeCol.Items.Clear();
+        cboSearchColumn.Items.Clear();
         txtXMin.Text = ""; txtXMax.Text = "";
         txtYMin.Text = ""; txtYMax.Text = "";
         _updating = false;
@@ -670,6 +671,8 @@ public partial class MainWindow : Window
         cboLabelCol.Items.Clear();
         cboLabelCol.Items.Add("(none)");
         cboSizeCol.Items.Add("(none)");
+        cboSearchColumn.Items.Clear();
+        cboSearchColumn.Items.Add("(all columns)");
 
         var displayCols = chkAlphabetize.IsChecked == true
             ? _columns!.OrderBy(c => c, StringComparer.OrdinalIgnoreCase).ToArray()
@@ -682,7 +685,9 @@ public partial class MainWindow : Window
             cboShapeCol.Items.Add(c);
             cboLabelCol.Items.Add(c);
             cboSizeCol.Items.Add(c);
+            cboSearchColumn.Items.Add(c);
         }
+        cboSearchColumn.SelectedIndex = 0;
 
         // Default: first numeric column for X, second numeric for Y
         int firstNum = -1, secondNum = -1;
@@ -2572,8 +2577,11 @@ public partial class MainWindow : Window
 
             if (parsed.column == null)
             {
-                // Simple text search: match any column
-                foreach (string col in _columns)
+                // Simple text search: match selected column or all columns
+                string? searchCol = cboSearchColumn.SelectedItem?.ToString();
+                bool allCols = searchCol == null || searchCol == "(all columns)";
+                var searchCols = allCols ? _columns : new[] { searchCol! };
+                foreach (string col in searchCols)
                 {
                     string val = row[col]?.ToString() ?? "";
                     if (val.Contains(query, StringComparison.OrdinalIgnoreCase))
@@ -3700,6 +3708,9 @@ public partial class MainWindow : Window
         cboShapeCol.Items.Add("(none)");
         cboLabelCol.Items.Add("(none)");
         cboSizeCol.Items.Add("(none)");
+        string? selSearch = cboSearchColumn.SelectedItem?.ToString();
+        cboSearchColumn.Items.Clear();
+        cboSearchColumn.Items.Add("(all columns)");
 
         foreach (var c in displayCols)
         {
@@ -3709,6 +3720,7 @@ public partial class MainWindow : Window
             cboShapeCol.Items.Add(c);
             cboLabelCol.Items.Add(c);
             cboSizeCol.Items.Add(c);
+            cboSearchColumn.Items.Add(c);
         }
 
         // Restore selections
@@ -3718,6 +3730,7 @@ public partial class MainWindow : Window
         if (selShape != null) cboShapeCol.SelectedItem = selShape;
         if (selSize != null) cboSizeCol.SelectedItem = selSize;
         if (selLabel != null) cboLabelCol.SelectedItem = selLabel;
+        cboSearchColumn.SelectedItem = selSearch ?? "(all columns)";
         _updating = false;
 
         // Reorder filter panel without resetting filter state
