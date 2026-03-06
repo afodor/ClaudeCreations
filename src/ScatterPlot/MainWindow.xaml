@@ -33,6 +33,14 @@
                 <MenuItem Header="_Save Image..." Click="MenuSaveImage_Click"
                           x:Name="menuSaveImage" IsEnabled="False"/>
             </MenuItem>
+            <MenuItem Header="_View">
+                <MenuItem Header="_Restore default view" Click="MenuRestoreDefaultView_Click"
+                          x:Name="menuRestoreDefault" IsEnabled="False"/>
+                <MenuItem Header="_Zoom to original data" Click="MenuZoomToOriginal_Click"
+                          x:Name="menuZoomOriginal" IsEnabled="False"/>
+                <MenuItem Header="Show _all" Click="MenuShowAll_Click"
+                          x:Name="menuShowAll" IsEnabled="False"/>
+            </MenuItem>
             <MenuItem Header="_Journal">
                 <MenuItem Header="_Publish view (new journal)..." Click="MenuJournalPublishNew_Click"
                           x:Name="menuJournalPublishNew" IsEnabled="False"/>

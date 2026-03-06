@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Data;
 using System.Globalization;
 using System.IO;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Windows;
@@ -17,7 +18,7 @@ namespace ScatterPlotExplorer;
 
 public partial class MainWindow : Window
 {
-    private const string AppVersion = "1.13";
+    private const string AppVersion = "1.14";
 
     // ---------- data state ----------
     private DataTable? _data;
@@ -65,6 +66,7 @@ public partial class MainWindow : Window
     // column filters
     private Dictionary<string, (double min, double max)> _numericFilters = new();
     private Dictionary<string, HashSet<string>> _categoricalFilters = new();
+    private HashSet<string> _sliderColumns = new(); // columns using slider mode instead of checkboxes
     private HashSet<int>? _filteredRows; // null = all visible
 
     // regression model
@@ -202,7 +204,11 @@ public partial class MainWindow : Window
         BuildRecentJournalsMenu();
         KeyDown += Window_KeyDown;
         _allWindows.Add(this);
-        Closed += (s, e) => _allWindows.Remove(this);
+        Closed += (s, e) =>
+        {
+            _allWindows.Remove(this);
+            SaveViewStateForFile();
+        };
 
         // Handle command-line journal launch
         if (App.JournalArg != null)
@@ -398,6 +404,9 @@ public partial class MainWindow : Window
             menuCopyImage.IsEnabled = true;
             menuJournalPublishNew.IsEnabled = true;
             menuJournalAppend.IsEnabled = true;
+            menuRestoreDefault.IsEnabled = true;
+            menuZoomOriginal.IsEnabled = true;
+            menuShowAll.IsEnabled = true;
             AddToRecentFiles(path);
             _selectedRows.Clear();
             _gridHighlightedRows.Clear();
@@ -405,6 +414,7 @@ public partial class MainWindow : Window
             _categoryColorOverrides.Clear();
             _pointColorOverrides.Clear();
             _userLines.Clear();
+            _sliderColumns.Clear();
             _regressionCoeffs = null;
             _regressionPredictors = null;
             _regressionResponse = null;
@@ -415,6 +425,9 @@ public partial class MainWindow : Window
             AddIdentityLineControls();
             UpdatePlot();
             UpdateSelectionDisplay();
+
+            // Restore saved view state for this file (if any)
+            RestoreViewStateForFile();
 
             if (raggedLineCount > 0)
                 MessageBox.Show($"{raggedLineCount} row(s) had fewer fields than the header ({dt.Columns.Count} columns).\nMissing fields were filled with NA.",
@@ -477,6 +490,7 @@ public partial class MainWindow : Window
             _categoryColorOverrides.Clear();
             _pointColorOverrides.Clear();
             _userLines.Clear();
+            _sliderColumns.Clear();
             _regressionCoeffs = null;
             _regressionPredictors = null;
             _regressionResponse = null;
@@ -559,6 +573,32 @@ public partial class MainWindow : Window
     }
 
     private void MenuExit_Click(object sender, RoutedEventArgs e) => Close();
+
+    private void MenuRestoreDefaultView_Click(object sender, RoutedEventArgs e)
+    {
+        if (_data == null || _filePath == null) return;
+        // Reload the file from scratch to get a completely fresh default view
+        _sliderColumns.Clear();
+        LoadFile(_filePath);
+        // Delete the saved view state so it doesn't auto-restore
+        try { File.Delete(ViewStatePath(_filePath)); } catch { }
+    }
+
+    private void MenuZoomToOriginal_Click(object sender, RoutedEventArgs e)
+    {
+        if (_data == null) return;
+        UpdateAxisRangeBoxes();
+        UpdatePlot();
+    }
+
+    private void MenuShowAll_Click(object sender, RoutedEventArgs e)
+    {
+        if (_data == null) return;
+        BuildFilterPanel();
+        UpdateAxisRangeBoxes();
+        UpdatePlot();
+        BroadcastFilterChange();
+    }
 
     // ====================================================================
     //  Recent files
@@ -1673,6 +1713,12 @@ public partial class MainWindow : Window
 
     private void BuildCategoricalFilter(string col)
     {
+        if (_sliderColumns.Contains(col))
+        {
+            BuildCategoricalSlider(col);
+            return;
+        }
+
         var categories = _data!.Rows.Cast<DataRow>()
             .Select(r => r[col].ToString()!)
             .Distinct()
@@ -1712,8 +1758,18 @@ public partial class MainWindow : Window
             cb.Checked += FilterCategorical_Changed;
             cb.Unchecked += FilterCategorical_Changed;
 
-            // Per-checkbox context menu for colour assignment
+            // Per-checkbox context menu
             var cbCtx = new ContextMenu();
+            var cbSelectAll = new MenuItem { Header = "Select All", Tag = $"fctx:all:{col}" };
+            cbSelectAll.Click += FilterContext_Click;
+            var cbSelectNone = new MenuItem { Header = "Select None", Tag = $"fctx:none:{col}" };
+            cbSelectNone.Click += FilterContext_Click;
+            var cbSlider = new MenuItem { Header = "Switch to slider", Tag = $"fctx:slider:{col}" };
+            cbSlider.Click += FilterContext_Click;
+            cbCtx.Items.Add(cbSelectAll);
+            cbCtx.Items.Add(cbSelectNone);
+            cbCtx.Items.Add(cbSlider);
+            cbCtx.Items.Add(new Separator());
             var assignColor = new MenuItem { Header = "Assign colour...", Tag = cat };
             assignColor.Click += (s, ev) =>
             {
@@ -1740,6 +1796,8 @@ public partial class MainWindow : Window
         selectAll.Click += FilterContext_Click;
         var selectNone = new MenuItem { Header = "Select None", Tag = $"fctx:none:{col}" };
         selectNone.Click += FilterContext_Click;
+        var switchToSlider = new MenuItem { Header = "Switch to slider", Tag = $"fctx:slider:{col}" };
+        switchToSlider.Click += FilterContext_Click;
         var colorBy = new MenuItem { Header = "Colour by this column", Tag = $"fctx:color:{col}" };
         colorBy.Click += FilterContext_Click;
         var sizeBy = new MenuItem { Header = "Size by this column", Tag = $"fctx:size:{col}" };
@@ -1748,6 +1806,7 @@ public partial class MainWindow : Window
         labelBy2.Click += FilterContext_Click;
         ctx.Items.Add(selectAll);
         ctx.Items.Add(selectNone);
+        ctx.Items.Add(switchToSlider);
         ctx.Items.Add(new Separator());
         ctx.Items.Add(colorBy);
         ctx.Items.Add(sizeBy);
@@ -1757,6 +1816,114 @@ public partial class MainWindow : Window
         scrollViewer.Content = stack;
         expander.Content = scrollViewer;
         filterPanel.Children.Add(expander);
+    }
+
+    private void BuildCategoricalSlider(string col)
+    {
+        var categories = _data!.Rows.Cast<DataRow>()
+            .Select(r => r[col].ToString()!)
+            .Distinct()
+            .OrderBy(s => s)
+            .ToArray();
+
+        if (categories.Length == 0) return;
+
+        // Default to first category selected
+        _categoricalFilters[col] = new HashSet<string> { categories[0] };
+
+        var expander = new Expander
+        {
+            Header = col,
+            FontSize = 11,
+            IsExpanded = false,
+            Margin = new Thickness(0, 0, 0, 2)
+        };
+
+        var stack = new StackPanel { Tag = $"fcat:{col}" };
+
+        var label = new TextBlock
+        {
+            Text = categories[0],
+            FontSize = 10,
+            FontWeight = FontWeights.SemiBold,
+            Margin = new Thickness(2, 2, 2, 0),
+            HorizontalAlignment = System.Windows.HorizontalAlignment.Center
+        };
+
+        var slider = new Slider
+        {
+            Minimum = 0,
+            Maximum = categories.Length - 1,
+            Value = 0,
+            IsSnapToTickEnabled = true,
+            TickFrequency = 1,
+            SmallChange = 1,
+            LargeChange = 1,
+            Margin = new Thickness(2, 0, 2, 2)
+        };
+
+        slider.ValueChanged += (s, ev) =>
+        {
+            int idx = (int)Math.Round(ev.NewValue);
+            if (idx < 0 || idx >= categories.Length) return;
+            label.Text = categories[idx];
+            _categoricalFilters[col] = new HashSet<string> { categories[idx] };
+            RecomputeFilteredRows();
+            UpdatePlot();
+            UpdateSelectionDisplay();
+            BroadcastFilterChange();
+        };
+
+        stack.Children.Add(label);
+        stack.Children.Add(slider);
+
+        // Right-click context menu
+        var ctx = new ContextMenu();
+        var switchToCb = new MenuItem { Header = "Switch to checkboxes", Tag = $"fctx:checkboxes:{col}" };
+        switchToCb.Click += FilterContext_Click;
+        var colorBy = new MenuItem { Header = "Colour by this column", Tag = $"fctx:color:{col}" };
+        colorBy.Click += FilterContext_Click;
+        var sizeBy = new MenuItem { Header = "Size by this column", Tag = $"fctx:size:{col}" };
+        sizeBy.Click += FilterContext_Click;
+        var labelBy2 = new MenuItem { Header = "Label by this column", Tag = $"fctx:label:{col}" };
+        labelBy2.Click += FilterContext_Click;
+        ctx.Items.Add(switchToCb);
+        ctx.Items.Add(new Separator());
+        ctx.Items.Add(colorBy);
+        ctx.Items.Add(sizeBy);
+        ctx.Items.Add(labelBy2);
+        stack.ContextMenu = ctx;
+
+        expander.Content = stack;
+        filterPanel.Children.Add(expander);
+    }
+
+    private void RebuildSingleCategoricalFilter(string col)
+    {
+        // Find and replace the Expander for this column in the filter panel
+        for (int i = 0; i < filterPanel.Children.Count; i++)
+        {
+            if (filterPanel.Children[i] is Expander exp)
+            {
+                // Check if this expander's content contains a StackPanel tagged for this col
+                StackPanel? sp = null;
+                if (exp.Content is ScrollViewer sv && sv.Content is StackPanel sp1) sp = sp1;
+                else if (exp.Content is StackPanel sp2) sp = sp2;
+
+                if (sp != null && sp.Tag?.ToString() == $"fcat:{col}")
+                {
+                    bool wasExpanded = exp.IsExpanded;
+                    filterPanel.Children.RemoveAt(i);
+                    BuildCategoricalFilter(col);
+                    // Move the newly added expander to the original position
+                    var newExp = filterPanel.Children[filterPanel.Children.Count - 1];
+                    filterPanel.Children.RemoveAt(filterPanel.Children.Count - 1);
+                    filterPanel.Children.Insert(i, newExp);
+                    if (newExp is Expander ne) ne.IsExpanded = wasExpanded;
+                    return;
+                }
+            }
+        }
     }
 
     private void ShowCategoryColorPicker(string categoryValue)
@@ -1902,6 +2069,28 @@ public partial class MainWindow : Window
                     break;
                 }
             }
+            return;
+        }
+
+        if (action == "slider")
+        {
+            _sliderColumns.Add(col);
+            RebuildSingleCategoricalFilter(col);
+            RecomputeFilteredRows();
+            UpdatePlot();
+            UpdateSelectionDisplay();
+            BroadcastFilterChange();
+            return;
+        }
+
+        if (action == "checkboxes")
+        {
+            _sliderColumns.Remove(col);
+            RebuildSingleCategoricalFilter(col);
+            RecomputeFilteredRows();
+            UpdatePlot();
+            UpdateSelectionDisplay();
+            BroadcastFilterChange();
             return;
         }
 
@@ -2462,6 +2651,9 @@ public partial class MainWindow : Window
                     cm.Items.Add(clearItem);
                 }
                 cm.Items.Add(new Separator());
+                var restoreDefault = new MenuItem { Header = "Restore default view" };
+                restoreDefault.Click += (s, args) => MenuRestoreDefaultView_Click(s!, args);
+                cm.Items.Add(restoreDefault);
                 var zoomOriginal = new MenuItem { Header = "Zoom to original data" };
                 zoomOriginal.Click += (s, args) => { UpdateAxisRangeBoxes(); UpdatePlot(); };
                 cm.Items.Add(zoomOriginal);
@@ -4612,6 +4804,7 @@ public partial class MainWindow : Window
         // Share filter state by reference — child has no filter UI
         w._numericFilters = _numericFilters;
         w._categoricalFilters = _categoricalFilters;
+        w._sliderColumns = _sliderColumns;
         w._filteredRows = _filteredRows;
         w.filterSeparator.Visibility = Visibility.Collapsed;
         w.filterHeader.Visibility = Visibility.Collapsed;
@@ -4983,6 +5176,40 @@ public partial class MainWindow : Window
         }
     }
 
+    private static string ViewStatePath(string filePath)
+    {
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(filePath));
+        string hex = Convert.ToHexString(hash).ToLowerInvariant();
+        return System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "ScatterPlotExplorer", "views", hex + ".json");
+    }
+
+    private void SaveViewStateForFile()
+    {
+        try
+        {
+            if (_filePath == null || _data == null) return;
+            string path = ViewStatePath(_filePath);
+            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, BuildViewStateJson(), Encoding.UTF8);
+        }
+        catch { }
+    }
+
+    private void RestoreViewStateForFile()
+    {
+        try
+        {
+            if (_filePath == null) return;
+            string path = ViewStatePath(_filePath);
+            if (!File.Exists(path)) return;
+            string json = File.ReadAllText(path, Encoding.UTF8);
+            ApplyViewState(json);
+        }
+        catch { }
+    }
+
     private string BuildViewStateJson()
     {
         var state = new Dictionary<string, object?>();
@@ -5032,6 +5259,10 @@ public partial class MainWindow : Window
         foreach (var (col, allowed) in _categoricalFilters)
             catFilters[col] = allowed.ToList();
         state["categoricalFilters"] = catFilters;
+
+        // Slider columns
+        if (_sliderColumns.Count > 0)
+            state["sliderColumns"] = _sliderColumns.ToList();
 
         // Selected rows
         state["selectedRows"] = _selectedRows.OrderBy(i => i).ToList();
@@ -5512,6 +5743,14 @@ function openEntry(btn) {{
                     _categoricalFilters[prop.Name] = set;
                 }
             }
+        }
+
+        // Slider columns
+        _sliderColumns.Clear();
+        if (root.TryGetProperty("sliderColumns", out var slCols) && slCols.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in slCols.EnumerateArray())
+                if (item.ValueKind == JsonValueKind.String) _sliderColumns.Add(item.GetString()!);
         }
 
         // Identity line
